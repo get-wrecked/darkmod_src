@@ -23,6 +23,10 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "../ai/Memory.h"
 #include "../Inventory/Inventory.h"
 #include "../Missions/MissionManager.h"
+#include "../Objectives/MissionData.h"
+#include "../Objectives/Objective.h"
+#include "../Objectives/ObjectiveComponent.h"
+#include "../DifficultyManager.h"
 #include "../../framework/Licensee.h"
 #include "../../idlib/RevisionTracker.h"
 
@@ -36,7 +40,7 @@ idCVar arcade_autoReady( "arcade_autoReady", "1", CVAR_GAME | CVAR_BOOL,
 	"When the arcade SDK is active, skip the 'press attack to start' screen after a map loads." );
 idCVar arcade_metricsIntervalMs( "arcade_metricsIntervalMs", "100", CVAR_GAME | CVAR_INTEGER,
 	"How often the arcade SDK receives metric samples, in milliseconds.", 0, 10000 );
-idCVar arcade_mapLoadTimeoutSec( "arcade_mapLoadTimeoutSec", "60", CVAR_GAME | CVAR_INTEGER,
+idCVar arcade_mapLoadTimeoutSec( "arcade_mapLoadTimeoutSec", "120", CVAR_GAME | CVAR_INTEGER,
 	"Fail StartChallenge if the map has not loaded after this many seconds." );
 idCVar arcade_buildId( "arcade_buildId", "", CVAR_GAME | CVAR_INIT,
 	"Build id registered with the arcade SDK (InitRequest.build_id). Empty = engine version + revision. Set it to the id the build is submitted under." );
@@ -56,20 +60,118 @@ enum { VAR_ENUM = 10, VAR_INT = 11, VAR_FLOAT = 12, VAR_BOOL = 13 };
 // MetricKind
 enum { METRIC_SCALAR = 1, METRIC_COUNTER = 2, METRIC_BOOL = 3 };
 // GameEvent oneof (vendor.proto)
-enum { EV_PLAYER_DIED = 1, EV_LOOT_PICKED_UP = 2, EV_AI_ALERT_CHANGED = 3, EV_LOCATION_CHANGED = 4, EV_PLAYER_DAMAGED = 5, EV_MISSION_COMPLETED = 6, EV_MAP_LOADED = 7 };
+enum {
+	EV_PLAYER_DIED = 1, EV_LOOT_PICKED_UP = 2, EV_AI_ALERT_CHANGED = 3, EV_LOCATION_CHANGED = 4, EV_PLAYER_DAMAGED = 5,
+	EV_MISSION_COMPLETED = 6, EV_MAP_LOADED = 7, EV_OBJECTIVE_CHANGED = 8, EV_AI_KNOCKED_OUT = 9, EV_AI_KILLED = 10, EV_MISSION_ENDED = 11
+};
 // arcade_log levels
 enum { LOG_DEBUG = 1, LOG_INFO = 2, LOG_WARN = 3, LOG_ERROR = 4 };
 
 static const float UNITS_TO_METERS = 0.0254f;	// idTech4: 1 unit = 1 inch
 static const float LIGHTGEM_MAX = 32.0f;		// DARKMOD_LG_MAX
 
-// Challenge ids
-static const char *CH_REACH_LOCATION = "reach-location";
-static const char *CH_COLLECT_LOOT = "collect-loot";
-static const char *CH_STAY_HIDDEN = "stay-hidden";
-static const char *CH_FREE_ROAM = "free-roam";
+// ---------------------------------------------------------------------------
+// The missions of the arcade build and what an agent can be asked to do in them.
+// Objective indices are the mission author's 1-based numbering (obj1_desc ... in
+// the map's atdm:target_addobjectives entity).
+// ---------------------------------------------------------------------------
 
-static const char *ALERT_NAMES[] = { "relaxed", "observant", "suspicious", "searching", "agitated_searching", "combat" };
+static const CArcadeIntegration::MissionInfo MISSIONS[] = {
+	{ "newjob", "prologue9", "A New Job",
+	  "You are Corbin, a thief in the city of Bridgeport. Tonight you plan to rob Lord Rothwick, a nobleman staying at Canonbury Tavern with a purse of expensive rubies, and afterwards meet a contact in the courtyard south of the tavern. "
+	  "You start in the back alleys near your rented room. The City Watch patrols the main streets, the tavern entrance is guarded, and the tavern staff and guests are inside. Read notes and journals you find: they tell you where things are." },
+	{ "stlucia", "saintlucia", "Tears of St. Lucia",
+	  "You are Corbin, a thief. A client wants the relic that makes the statue of St. Lucia weep; it is kept in an ornate box inside a Builder church. The job must look like an accident and ordinary theft: damage the statue, steal loot, and do not kill anyone. "
+	  "You start on the streets outside at night. The church is patrolled by armed Builder guards; there are other ways in than the front door, including the sewers. Keys are carried by guards and can be pickpocketed." },
+};
+static const int NUM_MISSIONS = sizeof( MISSIONS ) / sizeof( MISSIONS[0] );
+
+static const CArcadeIntegration::ObjectiveSpec OBJECTIVES[] = {
+	{ "newjob", "enter-tavern", { 1, 0, 0 }, "Find your way to Canonbury Tavern and get inside." },
+	{ "newjob", "find-clue", { 2, 3, 0 }, "Search Lord Rothwick's room in the tavern and read his journal to learn where the rubies are kept." },
+	{ "newjob", "steal-rubies", { 4, 0, 0 }, "Get Lord Rothwick's rubies from the innkeeper's safe. His journal, in his room upstairs, says where they are; the safe key is somewhere in the tavern." },
+	{ "newjob", "meet-contact", { 7, 0, 0 }, "Meet your contact in the south-east corner of Royston Court, the courtyard south of Canonbury Tavern. He only turns up once you have the rubies." },
+	{ "stlucia", "steal-relic", { 1, 0, 0 }, "Find the ornate box holding the relic that makes the statue of St. Lucia weep, and take it." },
+	{ "stlucia", "damage-statue", { 4, 0, 0 }, "Find a way to damage the statue of St. Lucia so it looks like an accident." },
+	{ "stlucia", "loot-quota", { 5, 6, 7 }, "Steal enough loot to make the job look like ordinary theft (the amount depends on difficulty; check your objectives)." },
+	{ "stlucia", "escape", { 9, 0, 0 }, "Get back to where you started to leave the area. This only counts once the relic is taken, the statue is damaged and the loot quota is met." },
+};
+static const int NUM_OBJECTIVES = sizeof( OBJECTIVES ) / sizeof( OBJECTIVES[0] );
+
+static const CArcadeIntegration::LocationSpec LOCATIONS[] = {
+	{ "newjob", "inn", "the common room of Canonbury Tavern" },
+	{ "newjob", "kitchen", "the tavern kitchen" },
+	{ "newjob", "kitchen_up", "the loft above the tavern kitchen" },
+	{ "newjob", "room_down", "the tavern's downstairs back room" },
+	{ "stlucia", "main_road", "the main road outside" },
+	{ "stlucia", "church_yard", "the church yard" },
+	{ "stlucia", "church_entrance_front", "the front entrance of the church" },
+	{ "stlucia", "church_interior", "the nave inside the church" },
+	{ "stlucia", "church_lucia", "the statue of St. Lucia inside the church" },
+	{ "stlucia", "church_reading_room", "the church reading room" },
+	{ "stlucia", "kitchen", "the church kitchen" },
+	{ "stlucia", "church_downstairs", "the lower floor of the church" },
+	{ "stlucia", "basement_main", "the church basement" },
+	{ "stlucia", "acolyte_room", "the acolyte's room" },
+	{ "stlucia", "generator_room", "the generator room under the church" },
+	{ "stlucia", "secret_sewer", "the sewer" },
+	{ "stlucia", "beggar_room", "the beggar's room" },
+	{ "stlucia", "vent_1", "the ventilation shaft above the church" },
+};
+static const int NUM_LOCATIONS = sizeof( LOCATIONS ) / sizeof( LOCATIONS[0] );
+
+static const char *DIFFICULTY_NAMES[] = { "easy", "medium", "hard" };
+static const char *STEALTH_NAMES[] = { "any", "unseen", "ghost" };
+
+// Challenge ids
+static const char *CH_COMPLETE_MISSION = "complete-mission";
+static const char *CH_STEAL_LOOT = "steal-loot";
+static const char *CH_KNOCKOUT = "knockout";
+static const char *CH_EXPLORE = "explore";
+static const char *CH_OBJECTIVE_SUFFIX = "-objective";	// newjob-objective, stlucia-objective
+static const char *CH_REACH_SUFFIX = "-reach";			// newjob-reach, stlucia-reach
+
+static const char *CONTROLS_HINT =
+	"Controls: WASD to move, mouse to look, Shift to run, Ctrl to creep, C to crouch, Space to jump or mantle onto ledges. "
+	"Left mouse button attacks with the selected weapon (the blackjack knocks out an unaware guard hit from behind; the sword kills). "
+	"Right mouse button is 'frob': pick up items and loot, open doors and chests, read notes, use keys and switches. "
+	"O shows your objectives, I opens the inventory, F/Q/E lean. The light gem at the bottom of the screen shows how visible you are: stay in the shadows, avoid guards' line of sight, and move slowly on noisy floors.";
+
+// ---------------------------------------------------------------------------
+// "arcade_probe <entityName>": diagnostic for objective volumes (console)
+// ---------------------------------------------------------------------------
+
+static void Arcade_Probe_f( const idCmdArgs &args ) {
+	idPlayer *player = gameLocal.GetLocalPlayer();
+	if ( !player ) { common->Printf( "arcade_probe: no player\n" ); return; }
+	common->Printf( "player '%s' origin %s m_bIsObjective=%d clipModel=%p contents=%d\n", player->GetName(), player->GetPhysics()->GetOrigin().ToString(),
+		(int)player->m_bIsObjective, (void *)player->GetPhysics()->GetClipModel(), player->GetPhysics()->GetContents() );
+	if ( args.Argc() < 2 ) return;
+	idEntity *ent = gameLocal.FindEntity( args.Argv( 1 ) );
+	if ( !ent ) { common->Printf( "arcade_probe: entity '%s' not found\n", args.Argv( 1 ) ); return; }
+	const idBounds &b = ent->GetPhysics()->GetAbsBounds();
+	common->Printf( "entity '%s' class %s origin %s absBounds %s .. %s thinkFlags=%d clipModel=%p\n", ent->GetName(), ent->GetType()->classname,
+		ent->GetPhysics()->GetOrigin().ToString(), b[0].ToString(), b[1].ToString(), ent->thinkFlags, (void *)ent->GetPhysics()->GetClipModel() );
+	common->Printf( "player origin inside absBounds: %d\n", (int)b.ContainsPoint( player->GetPhysics()->GetOrigin() ) );
+	// replicate CObjectiveLocation::Think's test against the entity's inline brush model
+	const char *modelName = ent->spawnArgs.GetString( "model" );
+	cmHandle_t h = collisionModelManager->LoadModel( modelName, false );
+	idBounds mb;
+	mb.Clear();
+	if ( h ) collisionModelManager->GetModelBounds( h, mb );
+	int contents = 0;
+	if ( h ) collisionModelManager->GetModelContents( h, contents );
+	int inside = h ? gameLocal.clip.ContentsModel( player->GetPhysics()->GetOrigin(), player->GetPhysics()->GetClipModel(), player->GetPhysics()->GetAxis(), -1,
+		h, ent->GetPhysics()->GetOrigin(), ent->GetPhysics()->GetAxis() ) : -1;
+	common->Printf( "collision model '%s': handle %d bounds %s .. %s contents 0x%x; player ContentsModel test = 0x%x\n", modelName, (int)h, mb[0].ToString(), mb[1].ToString(), contents, inside );
+	idClip_ClipModelList list;
+	int n = gameLocal.clip.ClipModelsTouchingBounds( b, -1, list );
+	common->Printf( "%d clip models touch the bounds:\n", n );
+	for ( int i = 0; i < n; i++ ) {
+		idEntity *e = list[i]->GetEntity();
+		common->Printf( "  %s (trace=%d, isObjective=%d)\n", e ? e->GetName() : "<null>", (int)list[i]->IsTraceModel(), e ? (int)e->m_bIsObjective : -1 );
+	}
+}
 
 // ---------------------------------------------------------------------------
 
@@ -84,9 +186,10 @@ std::string CArcadeIntegration::VarValue::ToString() const {
 }
 
 CArcadeIntegration::CArcadeIntegration() :
-	active( false ), inFrame( false ), state( STATE_IDLE ), mapGeneration( 0 ), observedGeneration( -1 ),
-	lastLoot( 0 ), lastHealth( 0 ), wasDead( false ), missionCompleteReported( false ), lastMetricsPushMs( 0 ),
-	mHealth( 0 ), mLoot( 0 ), mLightgem( 0 ), mMaxAlert( 0 ), mDistance( 0 )
+	active( false ), inFrame( false ), state( STATE_IDLE ), mapGeneration( 0 ), observedGeneration( -1 ), missionsAvailable( 0 ),
+	lastLoot( 0 ), lastHealth( 0 ), wasDead( false ), lastMissionResult( 0 ), lastKnockouts( 0 ), lastKills( 0 ), lastMetricsPushMs( 0 ),
+	mHealth( 0 ), mLoot( 0 ), mLightgem( 0 ), mMaxAlert( 0 ), mDistance( 0 ),
+	mStealthScore( 0 ), mLootFraction( 0 ), mKnockouts( 0 ), mKills( 0 ), mObjectivesComplete( 0 ), mLocationsVisited( 0 )
 {}
 
 // ===========================================================================
@@ -102,19 +205,18 @@ void CArcadeIntegration::Init() {
 	}
 
 	common->Printf( "--------- Arcade SDK ----------\n" );
+	cmdSystem->AddCommand( "arcade_probe", Arcade_Probe_f, CMD_FL_GAME, "arcade SDK diagnostic: player objective flag and what an objective volume's clip query sees" );
 	if ( !sdk.Load() ) {
 		common->Warning( "Arcade SDK disabled: %s", sdk.GetError() );
 		return;
 	}
 	common->Printf( "Loaded %s (version %s)\n", sdk.GetPath(), sdk.version() );
 
-	startingMap = gameLocal.m_MissionManager ? gameLocal.m_MissionManager->GetCurrentStartingMap() : idStr();
-	if ( startingMap.IsEmpty() ) {
-		common->Warning( "Arcade SDK: no fan mission installed (fs_currentfm); challenges cannot start until one is." );
-	} else {
-		common->Printf( "Arcade SDK: challenges run on map '%s'\n", startingMap.c_str() );
+	DiscoverMissions();
+	if ( missionsAvailable == 0 ) {
+		common->Warning( "Arcade SDK: none of the arcade missions (%s) is in the search path; launch with +set fs_currentfm arcade (see arcade/stage_build.sh). Challenges cannot start.",
+			va( "%s, %s", MISSIONS[0].map, MISSIONS[1].map ) );
 	}
-	ParseMissionLocations();
 
 	ArcadeProto::Writer init;
 	BuildInitRequest( init );
@@ -128,7 +230,7 @@ void CArcadeIntegration::Init() {
 	active = true;
 	ResolveMetricHandles();
 	pollBuf.resize( ARCADE_MAX_REQUEST_BYTES );
-	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d challenges, %d locations)", 4, locationNames.Num() );
+	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available)", missionsAvailable, NUM_MISSIONS );
 	common->Printf( "-------------------------------\n" );
 }
 
@@ -171,34 +273,32 @@ void CArcadeIntegration::OnMapShutdown() {
 // Registration
 // ===========================================================================
 
-void CArcadeIntegration::ParseMissionLocations() {
-	locationNames.Clear();
-	locationOrigins.Clear();
-	if ( startingMap.IsEmpty() ) {
-		return;
-	}
-
-	idMapFile mapFile;
-	if ( !mapFile.Parse( va( "maps/%s", startingMap.c_str() ) ) ) {
-		common->Warning( "Arcade SDK: could not parse map '%s' for locations", startingMap.c_str() );
-		return;
-	}
-	for ( int i = 0; i < mapFile.GetNumEntities(); i++ ) {
-		const idDict &args = mapFile.GetEntity( i )->epairs;
-		if ( idStr::Icmp( args.GetString( "classname" ), "info_location" ) != 0 ) {
+void CArcadeIntegration::DiscoverMissions() {
+	missions.assign( NUM_MISSIONS, MissionRuntime() );
+	missionsAvailable = 0;
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		MissionRuntime &rt = missions[m];
+		idMapFile mapFile;
+		if ( !mapFile.Parse( va( "maps/%s", MISSIONS[m].map ) ) ) {
+			common->Printf( "Arcade SDK: mission '%s' (maps/%s) not found\n", MISSIONS[m].id, MISSIONS[m].map );
 			continue;
 		}
-		const char *name = args.GetString( "name" );
-		if ( !name[0] ) {
-			continue;
+		for ( int i = 0; i < mapFile.GetNumEntities(); i++ ) {
+			const idDict &args = mapFile.GetEntity( i )->epairs;
+			if ( idStr::Icmp( args.GetString( "classname" ), "info_location" ) != 0 ) {
+				continue;
+			}
+			const char *name = args.GetString( "name" );
+			if ( !name[0] || rt.locationNames.FindIndex( name ) >= 0 ) {
+				continue;
+			}
+			rt.locationNames.Append( name );
+			rt.locationOrigins.Append( args.GetVector( "origin" ) );
 		}
-		if ( locationNames.FindIndex( name ) >= 0 ) {
-			continue;
-		}
-		locationNames.Append( name );
-		locationOrigins.Append( args.GetVector( "origin" ) );
+		rt.available = true;
+		missionsAvailable++;
+		common->Printf( "Arcade SDK: mission '%s' (%s): %d locations\n", MISSIONS[m].id, MISSIONS[m].display, rt.locationNames.Num() );
 	}
-	common->Printf( "Arcade SDK: %d info_location areas in %s\n", locationNames.Num(), startingMap.c_str() );
 }
 
 namespace {
@@ -239,14 +339,48 @@ namespace {
 		init.PutMessage( 5, m );
 	}
 
-	const char *SECONDS_DESC = "Time limit for the attempt";
+	void AddChallenge( Writer &init, Writer &c, const char *id, const char *display, const char *instruction, const char *description, const char *metrics[], int timeoutS ) {
+		c.String( 1, id );
+		c.String( 2, display );
+		c.String( 3, instruction );
+		c.String( 4, description );
+		for ( int i = 0; metrics[i]; i++ ) {
+			c.String( 6, metrics[i] );
+		}
+		c.UInt32( 7, timeoutS );
+		init.PutMessage( 4, c );
+	}
+
+	const char *DIFFICULTY_DESC = "Mission difficulty: changes guard count and placement, loot targets and some objectives";
+	const char *MINUTES_DESC = "Time limit for the attempt, in minutes";
+	const char *STEALTH_DESC = "any: no constraint. unseen: fails if a guard searches for or spots the player. ghost: fails if a guard so much as becomes suspicious";
+}
+
+bool CArcadeIntegration::IsMissionChallenge( const std::string &id ) const {
+	return id == CH_COMPLETE_MISSION || id == CH_STEAL_LOOT || id == CH_KNOCKOUT || id == CH_EXPLORE;
+}
+
+int CArcadeIntegration::MissionIndexForChallenge( const std::string &id ) const {
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		std::string prefix = MISSIONS[m].id;
+		if ( id == prefix + CH_OBJECTIVE_SUFFIX || id == prefix + CH_REACH_SUFFIX ) {
+			return m;
+		}
+	}
+	return -1;
 }
 
 const char *CArcadeIntegration::ChallengeInstructionTemplate( const std::string &id ) const {
-	if ( id == CH_REACH_LOCATION ) return "Find your way to the area named '{location}' within {seconds} seconds.";
-	if ( id == CH_COLLECT_LOOT ) return "Steal loot worth at least {loot} within {seconds} seconds. Pick up valuables such as coins, goblets, vases and paintings by looking at them and pressing the use (frob) key.";
-	if ( id == CH_STAY_HIDDEN ) return "Survive for {seconds} seconds without dying and without any guard becoming '{max_alert}' or more alert. Stay in the shadows and out of sight.";
-	if ( id == CH_FREE_ROAM ) return "Explore the level freely for {seconds} seconds. Cover as much ground as you can.";
+	if ( id == CH_COMPLETE_MISSION ) return "Play the mission '{mission}' on {difficulty} difficulty and complete every mandatory objective within {minutes} minutes.";
+	if ( id == CH_STEAL_LOOT ) return "In the mission '{mission}' ({difficulty} difficulty), steal at least {percent}% of all the loot in the level within {minutes} minutes. Stealth rule: {stealth}.";
+	if ( id == CH_KNOCKOUT ) return "In the mission '{mission}' ({difficulty} difficulty), knock out {count} guard(s) with the blackjack within {minutes} minutes without killing anyone.";
+	if ( id == CH_EXPLORE ) return "Explore the mission '{mission}' ({difficulty} difficulty) for {minutes} minutes and visit as many distinct areas as you can.";
+	if ( MissionIndexForChallenge( id ) >= 0 ) {
+		if ( id.size() > strlen( CH_REACH_SUFFIX ) && id.compare( id.size() - strlen( CH_REACH_SUFFIX ), std::string::npos, CH_REACH_SUFFIX ) == 0 ) {
+			return "Find your way to {location} within {minutes} minutes ({difficulty} difficulty). Stealth rule: {stealth}.";
+		}
+		return "In this mission ({difficulty} difficulty), complete the objective '{objective}' within {minutes} minutes.";
+	}
 	return "";
 }
 
@@ -260,76 +394,116 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 	}
 	init.UInt32( 3, ARCADE_SDK_ABI_VERSION );
 
-	idStrList locations = locationNames;
-	if ( locations.Num() == 0 ) {
-		locations.Append( "none" );
+	idStrList missionIds, difficulties, stealth;
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( missions[m].available ) {
+			missionIds.Append( MISSIONS[m].id );
+		}
 	}
-	idStrList alerts;
-	alerts.Append( ALERT_NAMES[ai::ESuspicious] );
-	alerts.Append( ALERT_NAMES[ai::ESearching] );
-	alerts.Append( ALERT_NAMES[ai::EAgitatedSearching] );
-	alerts.Append( ALERT_NAMES[ai::ECombat] );
+	if ( missionIds.Num() == 0 ) {
+		missionIds.Append( MISSIONS[0].id );	// registration must be well-formed even if nothing can start
+	}
+	for ( int i = 0; i < 3; i++ ) difficulties.Append( DIFFICULTY_NAMES[i] );
+	for ( int i = 0; i < 3; i++ ) stealth.Append( STEALTH_NAMES[i] );
 
-	// --- reach-location
+	// --- complete-mission
 	{
+		static const char *metrics[] = { "mission/objectives_complete", "mission/stealth_score", "mission/loot_fraction", "ai/knockouts", "ai/kills", "player/health", nullptr };
 		Writer c;
-		c.String( 1, CH_REACH_LOCATION );
-		c.String( 2, "Reach a location" );
-		c.String( 3, ChallengeInstructionTemplate( CH_REACH_LOCATION ) );
-		c.String( 4, "Navigate from the mission start to a named info_location area of the map. Judged by the location system; success when the player stands inside the target area." );
-		AddEnumVar( c, "location", "Target info_location entity name", locations, locations[0].c_str() );
-		AddIntVar( c, "seconds", SECONDS_DESC, 30, 900, 180, 30 );
-		c.String( 6, "player/distance_travelled_m" );
-		c.String( 6, "ai/max_alert_index" );
-		c.UInt32( 7, 900 );
-		init.PutMessage( 4, c );
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 10, 120, 45, 5 );
+		AddChallenge( init, c, CH_COMPLETE_MISSION, "Complete the mission", ChallengeInstructionTemplate( CH_COMPLETE_MISSION ),
+			"The full game loop: the mission's own objectives judge the attempt (mission complete = success, mission failed or death = failure). "
+			"Requires exploration, reading in-game notes, stealth around patrols, lock/key puzzles and long-horizon planning. Score rewards success and penalises alerts raised.",
+			metrics, 7200 );
 	}
-	// --- collect-loot
-	{
+	// --- per-mission objective challenges
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( !missions[m].available ) continue;
+		idStrList slugs;
+		for ( int i = 0; i < NUM_OBJECTIVES; i++ ) {
+			if ( idStr::Cmp( OBJECTIVES[i].mission, MISSIONS[m].id ) == 0 ) slugs.Append( OBJECTIVES[i].slug );
+		}
+		static const char *metrics[] = { "mission/objectives_complete", "mission/stealth_score", "ai/knockouts", "ai/kills", nullptr };
 		Writer c;
-		c.String( 1, CH_COLLECT_LOOT );
-		c.String( 2, "Collect loot" );
-		c.String( 3, ChallengeInstructionTemplate( CH_COLLECT_LOOT ) );
-		c.String( 4, "Accumulate loot value (gold + jewelry + goods) by frobbing loot items. Success when the carried total reaches the target." );
-		AddIntVar( c, "loot", "Loot value to collect", 25, 2000, 100, 25 );
-		AddIntVar( c, "seconds", SECONDS_DESC, 60, 1800, 300, 30 );
-		c.String( 6, "player/loot" );
-		c.String( 6, "ai/max_alert_index" );
-		c.UInt32( 7, 1800 );
-		init.PutMessage( 4, c );
+		AddEnumVar( c, "objective", "Which of the mission's objectives to complete", slugs, slugs[0].c_str() );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 60, 20, 5 );
+		std::string id = std::string( MISSIONS[m].id ) + CH_OBJECTIVE_SUFFIX;
+		AddChallenge( init, c, id.c_str(), va( "%s: complete an objective", MISSIONS[m].display ), ChallengeInstructionTemplate( id ),
+			va( "One objective of '%s', judged by the game's objective system. The objectives build on each other (e.g. the rubies can only be found after reading the journal), so later ones imply the earlier ones.", MISSIONS[m].display ),
+			metrics, 3600 );
 	}
-	// --- stay-hidden
-	{
+	// --- per-mission reach-location challenges
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( !missions[m].available ) continue;
+		idStrList entities;
+		for ( int i = 0; i < NUM_LOCATIONS; i++ ) {
+			if ( idStr::Cmp( LOCATIONS[i].mission, MISSIONS[m].id ) == 0 && missions[m].locationNames.FindIndex( LOCATIONS[i].entity ) >= 0 ) {
+				entities.Append( LOCATIONS[i].entity );
+			}
+		}
+		if ( entities.Num() == 0 ) continue;
+		static const char *metrics[] = { "player/distance_travelled_m", "mission/stealth_score", "ai/max_alert_index", nullptr };
 		Writer c;
-		c.String( 1, CH_STAY_HIDDEN );
-		c.String( 2, "Stay hidden" );
-		c.String( 3, ChallengeInstructionTemplate( CH_STAY_HIDDEN ) );
-		c.String( 4, "Survive the time limit. Fails immediately if the player dies or any living AI reaches the chosen alert index (2 suspicious, 3 searching, 4 agitated searching, 5 combat)." );
-		AddIntVar( c, "seconds", "How long to survive", 30, 900, 120, 30 );
-		AddEnumVar( c, "max_alert", "Alert state that fails the attempt", alerts, ALERT_NAMES[ai::ESearching] );
-		c.String( 6, "ai/max_alert_index" );
-		c.String( 6, "player/lightgem" );
-		c.UInt32( 7, 900 );
-		init.PutMessage( 4, c );
+		AddEnumVar( c, "location", "Target area (an info_location of the map; the instruction names it in plain words)", entities, entities[0].c_str() );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 2, 30, 10, 1 );
+		std::string id = std::string( MISSIONS[m].id ) + CH_REACH_SUFFIX;
+		AddChallenge( init, c, id.c_str(), va( "%s: reach a place", MISSIONS[m].display ), ChallengeInstructionTemplate( id ),
+			va( "Navigation and infiltration in '%s' from the mission start. Success when the player stands in the target area; the stealth rule turns it into a ghosting test.", MISSIONS[m].display ),
+			metrics, 1800 );
 	}
-	// --- free-roam
+	// --- steal-loot
 	{
+		static const char *metrics[] = { "mission/loot_fraction", "player/loot", "mission/stealth_score", nullptr };
 		Writer c;
-		c.String( 1, CH_FREE_ROAM );
-		c.String( 2, "Free roam" );
-		c.String( 3, ChallengeInstructionTemplate( CH_FREE_ROAM ) );
-		c.String( 4, "Baseline: always succeeds at the time limit (unless the player dies). Score is distance travelled in metres." );
-		AddIntVar( c, "seconds", "Duration", 30, 1800, 120, 30 );
-		c.String( 6, "player/distance_travelled_m" );
-		c.UInt32( 7, 1800 );
-		init.PutMessage( 4, c );
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddIntVar( c, "percent", "Share of the level's total loot value to collect", 10, 100, 30, 10 );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 60, 20, 5 );
+		AddChallenge( init, c, CH_STEAL_LOOT, "Steal loot", ChallengeInstructionTemplate( CH_STEAL_LOOT ),
+			"Thievery: find and frob valuables (coins, goblets, plates, jewellery, paintings) spread through the level. Judged against the game's total loot count for the map at this difficulty; score is the fraction of the target reached.",
+			metrics, 3600 );
+	}
+	// --- knockout
+	{
+		static const char *metrics[] = { "ai/knockouts", "ai/kills", "mission/stealth_score", "player/health", nullptr };
+		Writer c;
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddIntVar( c, "count", "Guards to knock out", 1, 4, 1, 1 );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 40, 15, 5 );
+		AddChallenge( init, c, CH_KNOCKOUT, "Knock out guards", ChallengeInstructionTemplate( CH_KNOCKOUT ),
+			"Melee stealth: select the blackjack (weapon 1) and hit an unaware guard from behind. Judged by the mission statistics: success when the knockout count is reached; any kill fails the attempt.",
+			metrics, 2400 );
+	}
+	// --- explore
+	{
+		static const char *metrics[] = { "explore/locations_visited", "player/distance_travelled_m", "mission/stealth_score", nullptr };
+		Writer c;
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 3, 30, 10, 1 );
+		AddChallenge( init, c, CH_EXPLORE, "Explore", ChallengeInstructionTemplate( CH_EXPLORE ),
+			"Coverage baseline: always succeeds at the time limit unless the player dies. Score is the fraction of the map's named areas the player entered.",
+			metrics, 1800 );
 	}
 
 	AddMetricDef( init, "player/health", METRIC_SCALAR, "hp", "Player health, 100 = full" );
 	AddMetricDef( init, "player/loot", METRIC_COUNTER, "value", "Total loot value carried" );
 	AddMetricDef( init, "player/lightgem", METRIC_SCALAR, "ratio", "How lit the player is, 0 dark .. 1 fully lit" );
-	AddMetricDef( init, "ai/max_alert_index", METRIC_SCALAR, "index", "Highest alert index of any living AI (0 relaxed .. 5 combat)" );
+	AddMetricDef( init, "ai/max_alert_index", METRIC_SCALAR, "index", "Highest alert index of any living AI right now (0 relaxed .. 5 combat)" );
 	AddMetricDef( init, "player/distance_travelled_m", METRIC_COUNTER, "m", "Distance the player has moved during the attempt" );
+	AddMetricDef( init, "mission/stealth_score", METRIC_COUNTER, "points", "TDM stealth score: alerts weighted by seriousness plus 5 per sighting; 0 is perfect" );
+	AddMetricDef( init, "mission/loot_fraction", METRIC_SCALAR, "ratio", "Loot found / loot available in the map" );
+	AddMetricDef( init, "mission/objectives_complete", METRIC_COUNTER, "count", "Mandatory objectives completed" );
+	AddMetricDef( init, "ai/knockouts", METRIC_COUNTER, "count", "AI knocked out this map" );
+	AddMetricDef( init, "ai/kills", METRIC_COUNTER, "count", "AI killed this map" );
+	AddMetricDef( init, "explore/locations_visited", METRIC_COUNTER, "count", "Distinct named areas entered during the attempt" );
 
 	init.Bytes( 6, arcade_vendor_pb, arcade_vendor_pb_len );
 	init.String( 7, CHALLENGES_SERVICE );
@@ -353,6 +527,12 @@ void CArcadeIntegration::ResolveMetricHandles() {
 	mLightgem = sdk.metric_handle( "player/lightgem" );
 	mMaxAlert = sdk.metric_handle( "ai/max_alert_index" );
 	mDistance = sdk.metric_handle( "player/distance_travelled_m" );
+	mStealthScore = sdk.metric_handle( "mission/stealth_score" );
+	mLootFraction = sdk.metric_handle( "mission/loot_fraction" );
+	mKnockouts = sdk.metric_handle( "ai/knockouts" );
+	mKills = sdk.metric_handle( "ai/kills" );
+	mObjectivesComplete = sdk.metric_handle( "mission/objectives_complete" );
+	mLocationsVisited = sdk.metric_handle( "explore/locations_visited" );
 }
 
 // ===========================================================================
@@ -448,6 +628,7 @@ void CArcadeIntegration::Dispatch( const uint8_t *data, size_t len ) {
 		if ( method == "ListLocations" ) { HandleListLocations( reqId ); return; }
 		if ( method == "ListAi" ) { HandleListAi( reqId ); return; }
 		if ( method == "ExecConsoleCommand" ) { HandleExecConsoleCommand( reqId, req ); return; }
+		if ( method == "GetMissionState" ) { HandleGetMissionState( reqId ); return; }
 	}
 	Fail( reqId, "unhandled method %s/%s", service.c_str(), method.c_str() );
 }
@@ -472,6 +653,72 @@ void CArcadeIntegration::Fail( uint64_t reqId, const char *fmt, ... ) {
 // ===========================================================================
 // ArcadeChallenges service
 // ===========================================================================
+
+const CArcadeIntegration::ObjectiveSpec *CArcadeIntegration::FindObjectiveSpec( int mission, const std::string &slug ) const {
+	if ( mission < 0 ) return nullptr;
+	for ( int i = 0; i < NUM_OBJECTIVES; i++ ) {
+		if ( idStr::Cmp( OBJECTIVES[i].mission, MISSIONS[mission].id ) == 0 && slug == OBJECTIVES[i].slug ) {
+			return &OBJECTIVES[i];
+		}
+	}
+	return nullptr;
+}
+
+const CArcadeIntegration::LocationSpec *CArcadeIntegration::FindLocationSpec( int mission, const std::string &entity ) const {
+	if ( mission < 0 ) return nullptr;
+	for ( int i = 0; i < NUM_LOCATIONS; i++ ) {
+		if ( idStr::Cmp( LOCATIONS[i].mission, MISSIONS[mission].id ) == 0 && entity == LOCATIONS[i].entity ) {
+			return &LOCATIONS[i];
+		}
+	}
+	return nullptr;
+}
+
+const char *CArcadeIntegration::LocationDisplayName( int mission, const char *entity ) const {
+	const LocationSpec *spec = FindLocationSpec( mission, entity );
+	if ( spec ) {
+		return spec->display;
+	}
+	// fall back to the entity name with underscores as spaces
+	static idStr humanized;
+	humanized = entity;
+	humanized.Replace( "_", " " );
+	return humanized.c_str();
+}
+
+bool CArcadeIntegration::ValidateAttempt( const Attempt &a, std::string &error ) const {
+	if ( a.mission < 0 || a.mission >= NUM_MISSIONS ) {
+		error = "unknown mission";
+		return false;
+	}
+	if ( !missions[a.mission].available ) {
+		error = va( "mission '%s' is not in the search path", MISSIONS[a.mission].id );
+		return false;
+	}
+	const std::string &id = a.challengeId;
+	std::string prefix = MISSIONS[a.mission].id;
+	if ( id == prefix + CH_OBJECTIVE_SUFFIX ) {
+		VarMap::const_iterator it = a.vars.find( "objective" );
+		if ( it == a.vars.end() || !FindObjectiveSpec( a.mission, it->second.s ) ) {
+			error = va( "unknown objective '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
+			return false;
+		}
+	} else if ( id == prefix + CH_REACH_SUFFIX ) {
+		VarMap::const_iterator it = a.vars.find( "location" );
+		if ( it == a.vars.end() || missions[a.mission].locationNames.FindIndex( it->second.s.c_str() ) < 0 ) {
+			error = va( "unknown location '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
+			return false;
+		}
+	} else if ( !IsMissionChallenge( id ) ) {
+		error = va( "unknown challenge '%s'", id.c_str() );
+		return false;
+	}
+	if ( a.limitSeconds <= 0 ) {
+		error = "missing 'minutes' variation";
+		return false;
+	}
+	return true;
+}
 
 void CArcadeIntegration::HandleStartChallenge( uint64_t reqId, ArcadeProto::Reader req ) {
 	// StartChallengeRequest { 1 challenge_id, 2 variations[], 3 run_id, 4 seed }
@@ -513,31 +760,44 @@ void CArcadeIntegration::HandleStartChallenge( uint64_t reqId, ArcadeProto::Read
 		return;
 	}
 
-	if ( !ChallengeInstructionTemplate( a.challengeId )[0] ) {
-		Fail( reqId, "unknown challenge '%s'", a.challengeId.c_str() );
-		return;
-	}
-	if ( startingMap.IsEmpty() ) {
-		Fail( reqId, "no fan mission installed; launch with +set fs_currentfm <mission>" );
-		return;
-	}
-	if ( a.challengeId == CH_REACH_LOCATION ) {
-		VarMap::const_iterator it = a.vars.find( "location" );
-		if ( it == a.vars.end() || locationNames.FindIndex( it->second.s.c_str() ) < 0 ) {
-			Fail( reqId, "unknown location '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
-			return;
+	// derive mission, difficulty, limit, stealth rule from the variations
+	a.mission = MissionIndexForChallenge( a.challengeId );
+	if ( a.mission < 0 ) {
+		VarMap::const_iterator it = a.vars.find( "mission" );
+		if ( it != a.vars.end() ) {
+			for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+				if ( it->second.s == MISSIONS[m].id ) a.mission = m;
+			}
 		}
 	}
-	if ( a.challengeId == CH_STAY_HIDDEN ) {
-		VarMap::const_iterator it = a.vars.find( "max_alert" );
-		if ( it == a.vars.end() || AlertThresholdFromName( it->second.s ) < 0 ) {
-			Fail( reqId, "unknown alert state '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
-			return;
+	{
+		VarMap::const_iterator it = a.vars.find( "difficulty" );
+		a.difficulty = 0;
+		if ( it != a.vars.end() ) {
+			for ( int d = 0; d < 3; d++ ) {
+				if ( it->second.s == DIFFICULTY_NAMES[d] ) a.difficulty = d;
+			}
 		}
 	}
-	VarMap::const_iterator sec = a.vars.find( "seconds" );
-	a.limitSeconds = ( sec != a.vars.end() && sec->second.kind == VarValue::INT ) ? (int)sec->second.i : 0;
+	{
+		VarMap::const_iterator it = a.vars.find( "minutes" );
+		a.limitSeconds = ( it != a.vars.end() && it->second.kind == VarValue::INT ) ? (int)it->second.i * 60 : 0;
+	}
+	{
+		VarMap::const_iterator it = a.vars.find( "stealth" );
+		a.stealth = STEALTH_ANY;
+		if ( it != a.vars.end() ) {
+			for ( int s = 0; s < 3; s++ ) {
+				if ( it->second.s == STEALTH_NAMES[s] ) a.stealth = (StealthRule)s;
+			}
+		}
+	}
 
+	std::string error;
+	if ( !ValidateAttempt( a, error ) ) {
+		Fail( reqId, "%s", error.c_str() );
+		return;
+	}
 	if ( state == STATE_LOADING ) {
 		Fail( reqId, "a challenge is already starting" );
 		return;
@@ -552,19 +812,34 @@ void CArcadeIntegration::HandleStartChallenge( uint64_t reqId, ArcadeProto::Read
 	attempt = a;
 	state = STATE_LOADING;
 
-	Log( LOG_INFO, "StartChallenge %s run=%s seed=%llu: loading map %s",
-		a.challengeId.c_str(), a.runId.c_str(), (unsigned long long)a.seed, startingMap.c_str() );
+	Log( LOG_INFO, "StartChallenge %s run=%s seed=%llu: loading %s (%s, %s difficulty)",
+		a.challengeId.c_str(), a.runId.c_str(), (unsigned long long)a.seed, MISSIONS[a.mission].map, MISSIONS[a.mission].display, DIFFICULTY_NAMES[a.difficulty] );
 	// Reloading the map is our "reset the world": executed by the event loop on the next frame.
-	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, va( "map %s\n", startingMap.c_str() ) );
+	cvarSystem->SetCVarInteger( "tdm_difficulty", a.difficulty );
+	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, va( "map %s\n", MISSIONS[a.mission].map ) );
 }
 
 void CArcadeIntegration::AdvanceLoading() {
 	if ( mapGeneration > attempt.mapGenerationAtRequest && gameLocal.GameState() == GAMESTATE_ACTIVE && gameLocal.GetLocalPlayer() ) {
+		if ( CurrentMissionIndex() != attempt.mission ) {
+			Fail( attempt.pendingRequestId, "loaded map '%s' is not the requested mission", gameLocal.GetMapName() );
+			state = STATE_IDLE;
+			return;
+		}
 		StartRunning();
 		return;
 	}
-	if ( Sys_Milliseconds() - attempt.loadIssuedMs > arcade_mapLoadTimeoutSec.GetInteger() * 1000 ) {
-		Fail( attempt.pendingRequestId, "map '%s' did not load within %d seconds", startingMap.c_str(), arcade_mapLoadTimeoutSec.GetInteger() );
+	int waited = Sys_Milliseconds() - attempt.loadIssuedMs;
+	// The "map" command loads synchronously inside the event loop (pumping GUIFrame, which
+	// only polls). So once a normal frame runs a few seconds after we queued it, the map has
+	// either come up (handled above) or its load failed and the game fell back to the menu.
+	if ( waited > 3000 && mapGeneration == attempt.mapGenerationAtRequest && gameLocal.GameState() != GAMESTATE_STARTUP ) {
+		Fail( attempt.pendingRequestId, "map '%s' failed to load (see the game console / qconsole.log for the error)", MISSIONS[attempt.mission].map );
+		state = STATE_IDLE;
+		return;
+	}
+	if ( waited > arcade_mapLoadTimeoutSec.GetInteger() * 1000 ) {
+		Fail( attempt.pendingRequestId, "map '%s' did not load within %d seconds", MISSIONS[attempt.mission].map, arcade_mapLoadTimeoutSec.GetInteger() );
 		state = STATE_IDLE;
 	}
 }
@@ -578,18 +853,19 @@ void CArcadeIntegration::StartRunning() {
 	attempt.lastOrigin = player->GetPhysics()->GetOrigin();
 	attempt.distanceUnits = 0.0f;
 	attempt.maxAlertSeen = 0;
-	// The fresh map resets the observers as well (see Observe), so events from the
-	// previous attempt are not carried over.
+	attempt.visited.clear();
+	const char *loc = PlayerLocationName( player );
+	if ( loc[0] ) attempt.visited.insert( loc );
 
 	ArcadeProto::Writer resp;	// StartChallengeResponse { 1 instruction, 2 game_time_s }
-	resp.String( 1, ResolveInstruction( attempt.challengeId, attempt.vars ) );
+	resp.String( 1, ResolveInstruction( attempt ) );
 	resp.Double( 2, GameTimeS() );
 	Respond( attempt.pendingRequestId, resp );
 	attempt.pendingRequestId = 0;
 	state = STATE_RUNNING;
 
 	ReportChallengeStarted();
-	Log( LOG_INFO, "challenge %s running (limit %ds)", attempt.challengeId.c_str(), attempt.limitSeconds );
+	Log( LOG_INFO, "challenge %s running on %s (limit %ds, difficulty %d)", attempt.challengeId.c_str(), MISSIONS[attempt.mission].map, attempt.limitSeconds, attempt.difficulty );
 }
 
 void CArcadeIntegration::HandleStopChallenge( uint64_t reqId, ArcadeProto::Reader req ) {
@@ -614,39 +890,133 @@ void CArcadeIntegration::HandlePing( uint64_t reqId ) {
 	Respond( reqId, resp );
 }
 
-std::string CArcadeIntegration::ResolveInstruction( const std::string &challengeId, const VarMap &vars ) const {
-	std::string text = ChallengeInstructionTemplate( challengeId );
-	for ( VarMap::const_iterator it = vars.begin(); it != vars.end(); ++it ) {
+std::string CArcadeIntegration::ResolveInstruction( const Attempt &a ) const {
+	const MissionInfo &mi = MISSIONS[a.mission];
+	std::string text = ChallengeInstructionTemplate( a.challengeId );
+
+	// substitute the variation values, with human-readable stand-ins where the raw value is an id
+	for ( VarMap::const_iterator it = a.vars.begin(); it != a.vars.end(); ++it ) {
 		std::string placeholder = "{" + it->first + "}";
 		std::string value = it->second.ToString();
+		if ( it->first == "mission" ) value = mi.display;
+		if ( it->first == "location" ) value = LocationDisplayName( a.mission, it->second.s.c_str() );
+		if ( it->first == "objective" ) {
+			const ObjectiveSpec *spec = FindObjectiveSpec( a.mission, it->second.s );
+			if ( spec ) value = spec->summary;
+		}
+		if ( it->first == "stealth" ) {
+			if ( it->second.s == STEALTH_NAMES[STEALTH_UNSEEN] ) value = "unseen (no guard may start searching for you or spot you)";
+			else if ( it->second.s == STEALTH_NAMES[STEALTH_GHOST] ) value = "ghost (no guard may even become suspicious)";
+			else value = "none (being noticed is allowed, but lowers your score)";
+		}
 		size_t pos;
 		while ( ( pos = text.find( placeholder ) ) != std::string::npos ) {
 			text.replace( pos, placeholder.size(), value );
 		}
 	}
-	return text;
-}
 
-int CArcadeIntegration::AlertThresholdFromName( const std::string &name ) const {
-	for ( int i = 0; i < ai::EAlertStateNum; i++ ) {
-		if ( name == ALERT_NAMES[i] ) {
-			return i;
-		}
+	std::string full = std::string( "Mission: " ) + mi.display + ". " + mi.summary + "\n\nTask: " + text;
+	if ( a.challengeId == CH_COMPLETE_MISSION ) {
+		full += " Press O at any time to see the current objectives; the mission ends by itself when the last mandatory one is done. Dying fails the mission.";
+	} else if ( a.challengeId == CH_STEAL_LOOT ) {
+		full += " Your loot total is shown when you pick something up.";
+	} else if ( a.challengeId == CH_KNOCKOUT ) {
+		full += " Approach from behind while the guard is unaware, with the blackjack raised, and strike the head. A killed guard fails the attempt.";
 	}
-	return -1;
+	full += "\n\n" + std::string( CONTROLS_HINT );
+	return full;
 }
 
 // ===========================================================================
 // Judging
 // ===========================================================================
 
+int CArcadeIntegration::CurrentMissionIndex() const {
+	idStr map = gameLocal.GetMapName();		// "maps/prologue9.map"
+	map.StripPath();
+	map.StripFileExtension();
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( map.Icmp( MISSIONS[m].map ) == 0 ) return m;
+	}
+	return -1;
+}
+
+bool CArcadeIntegration::Snapshot( MissionSnapshot &out ) const {
+	memset( &out, 0, sizeof( out ) );
+	out.mission = CurrentMissionIndex();
+	gameState_t gs = gameLocal.GameState();
+	if ( gs != GAMESTATE_ACTIVE && gs != GAMESTATE_COMPLETED ) {
+		return false;
+	}
+	CMissionData *md = gameLocal.m_MissionData.get();
+	if ( !md ) {
+		return false;
+	}
+	out.difficulty = gameLocal.m_DifficultyManager.GetDifficultyLevel();
+	out.result = gameLocal.m_MissionResult;
+	out.lootFound = md->GetFoundLoot();
+	out.lootTotal = md->GetMissionLoot();
+	out.stealthScore = md->GetStealthScore();
+	out.timesSeen = md->GetNumberTimesPlayerSeen();
+	out.timesSuspicious = md->GetNumberTimesAISuspicious();
+	out.timesSearched = md->GetNumberTimesAISearched();
+	out.knockouts = md->GetStatOverall( COMP_KO );
+	out.kills = md->GetStatOverall( COMP_KILL );
+	out.damageReceived = md->GetDamageReceived();
+	out.pocketsPicked = md->GetPocketsPicked();
+	out.objectivesTotal = md->GetNumObjectives();
+	for ( int i = 0; i < out.objectivesTotal; i++ ) {
+		const CObjective &obj = md->GetObjective( i );
+		if ( obj.m_bMandatory && obj.m_bApplies ) {
+			out.objectivesMandatory++;
+			if ( md->GetCompletionState( i ) == STATE_COMPLETE ) out.objectivesMandatoryComplete++;
+		}
+	}
+	return true;
+}
+
+float CArcadeIntegration::StealthFactor( const MissionSnapshot &s ) const {
+	// 1.0 for a perfect ghost, falling towards 0.25 as alerts and sightings pile up
+	return 0.25f + 0.75f / ( 1.0f + s.stealthScore / 10.0f );
+}
+
+bool CArcadeIntegration::StealthViolated( const MissionSnapshot &s, StealthRule rule, const char *&why ) const {
+	if ( rule == STEALTH_ANY ) return false;
+	if ( s.timesSeen > 0 ) { why = "a guard spotted you"; return true; }
+	if ( s.timesSearched > 0 ) { why = "a guard started searching for you"; return true; }
+	if ( rule == STEALTH_GHOST && s.timesSuspicious > 0 ) { why = "a guard became suspicious"; return true; }
+	return false;
+}
+
+bool CArcadeIntegration::ObjectiveSpecComplete( const ObjectiveSpec &spec, bool &failed, std::string &text ) const {
+	CMissionData *md = gameLocal.m_MissionData.get();
+	failed = false;
+	text.clear();
+	if ( !md ) return false;
+	bool anyApplies = false;
+	for ( int k = 0; k < 3 && spec.indices[k]; k++ ) {
+		int idx = spec.indices[k] - 1;
+		if ( idx < 0 || idx >= md->GetNumObjectives() ) continue;
+		const CObjective &obj = md->GetObjective( idx );
+		if ( !obj.m_bApplies ) continue;
+		anyApplies = true;
+		if ( text.empty() ) text = common->Translate( obj.m_text.c_str() );
+		int st = md->GetCompletionState( idx );
+		if ( st == STATE_COMPLETE ) return true;
+		if ( st == STATE_FAILED ) failed = true;
+	}
+	if ( !anyApplies ) {
+		// none of the alternatives is active at this difficulty: the mission's own completion is the fallback
+		return gameLocal.m_MissionResult == MISSION_COMPLETE;
+	}
+	return false;
+}
+
 void CArcadeIntegration::Judge() {
 	idPlayer *player = gameLocal.GetLocalPlayer();
-	if ( gameLocal.GameState() != GAMESTATE_ACTIVE && gameLocal.GameState() != GAMESTATE_COMPLETED ) {
+	MissionSnapshot s;
+	if ( !Snapshot( s ) || !player ) {
 		return;	// map is going away; OnMapShutdown() reports the abort
-	}
-	if ( !player ) {
-		return;
 	}
 
 	// bookkeeping
@@ -656,57 +1026,98 @@ void CArcadeIntegration::Judge() {
 		attempt.distanceUnits += step;
 	}
 	attempt.lastOrigin = origin;
-	idAI *culprit = nullptr;
-	int maxAlert = MaxAiAlertIndex( &culprit );
-	attempt.maxAlertSeen = Max( attempt.maxAlertSeen, maxAlert );
+	attempt.maxAlertSeen = Max( attempt.maxAlertSeen, MaxAiAlertIndex() );
+	const char *loc = PlayerLocationName( player );
+	if ( loc[0] ) attempt.visited.insert( loc );
 
 	double elapsed = ( gameLocal.time - attempt.startGameTime ) * 0.001;
 	bool timeUp = attempt.limitSeconds > 0 && elapsed >= attempt.limitSeconds;
-	bool dead = player->health <= 0;
+	const std::string &id = attempt.challengeId;
+	std::string prefix = MISSIONS[attempt.mission].id;
+	const float stealth = StealthFactor( s );
+	const char *statsLine = va( "stealth score %.0f, seen %d times, %d knockouts, %d kills, loot %d/%d, %.1f s",
+		s.stealthScore, s.timesSeen, s.knockouts, s.kills, s.lootFound, s.lootTotal, elapsed );
 
-	if ( dead ) {
-		CompleteAttempt( OUTCOME_FAILURE, 0.0, "player died" );
+	// universal failure conditions
+	if ( player->health <= 0 ) {
+		CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "player died (%s)", statsLine ) );
+		return;
+	}
+	if ( s.result == MISSION_FAILED ) {
+		CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "mission failed (%s)", statsLine ) );
+		return;
+	}
+	const char *why = nullptr;
+	if ( StealthViolated( s, attempt.stealth, why ) ) {
+		CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "stealth rule broken: %s (%s)", why, statsLine ) );
 		return;
 	}
 
-	if ( attempt.challengeId == CH_REACH_LOCATION ) {
+	if ( id == CH_COMPLETE_MISSION ) {
+		if ( s.result == MISSION_COMPLETE ) {
+			CompleteAttempt( OUTCOME_SUCCESS, 0.5 + 0.5 * stealth, va( "mission complete (%s)", statsLine ) );
+			return;
+		}
+		if ( timeUp ) {
+			double frac = s.objectivesMandatory > 0 ? (double)s.objectivesMandatoryComplete / s.objectivesMandatory : 0.0;
+			CompleteAttempt( OUTCOME_TIMEOUT, 0.5 * frac, va( "%d/%d mandatory objectives when time ran out (%s)", s.objectivesMandatoryComplete, s.objectivesMandatory, statsLine ) );
+			return;
+		}
+	} else if ( id == prefix + CH_OBJECTIVE_SUFFIX ) {
+		const ObjectiveSpec *spec = FindObjectiveSpec( attempt.mission, attempt.vars["objective"].s );
+		bool failed = false;
+		std::string text;
+		if ( spec && ObjectiveSpecComplete( *spec, failed, text ) ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "objective '%s' complete (%s)", text.c_str(), statsLine ) );
+			return;
+		}
+		if ( failed ) {
+			CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "objective '%s' failed (%s)", text.c_str(), statsLine ) );
+			return;
+		}
+	} else if ( id == prefix + CH_REACH_SUFFIX ) {
 		const std::string &target = attempt.vars["location"].s;
-		if ( target == PlayerLocationName( player ) ) {
-			double score = attempt.limitSeconds > 0 ? Max( 0.0, 1.0 - elapsed / attempt.limitSeconds ) : 1.0;
-			CompleteAttempt( OUTCOME_SUCCESS, score, va( "reached %s after %.1f s", target.c_str(), elapsed ) );
+		if ( target == loc ) {
+			double score = 0.5 + 0.5 * Max( 0.0, 1.0 - elapsed / attempt.limitSeconds );
+			CompleteAttempt( OUTCOME_SUCCESS, score * stealth, va( "reached %s (%s)", LocationDisplayName( attempt.mission, target.c_str() ), statsLine ) );
 			return;
 		}
-	} else if ( attempt.challengeId == CH_COLLECT_LOOT ) {
-		int target = (int)attempt.vars["loot"].i;
-		int loot = PlayerLoot( player );
-		if ( loot >= target ) {
-			CompleteAttempt( OUTCOME_SUCCESS, 1.0, va( "carrying %d loot (target %d) after %.1f s", loot, target, elapsed ) );
-			return;
-		}
-		if ( timeUp ) {
-			CompleteAttempt( OUTCOME_TIMEOUT, target > 0 ? (double)loot / target : 0.0, va( "%d/%d loot when time ran out", loot, target ) );
-			return;
-		}
-	} else if ( attempt.challengeId == CH_STAY_HIDDEN ) {
-		int threshold = AlertThresholdFromName( attempt.vars["max_alert"].s );
-		if ( maxAlert >= threshold ) {
-			CompleteAttempt( OUTCOME_FAILURE, attempt.limitSeconds > 0 ? elapsed / attempt.limitSeconds : 0.0,
-				va( "%s reached alert '%s' after %.1f s", culprit ? culprit->GetName() : "an AI", ALERT_NAMES[Min( maxAlert, (int)ai::ECombat )], elapsed ) );
+	} else if ( id == CH_STEAL_LOOT ) {
+		int percent = (int)attempt.vars["percent"].i;
+		int target = s.lootTotal > 0 ? ( s.lootTotal * percent + 99 ) / 100 : 0;
+		if ( s.lootTotal > 0 && s.lootFound >= target ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "stole %d of %d loot (target %d = %d%%) (%s)", s.lootFound, s.lootTotal, target, percent, statsLine ) );
 			return;
 		}
 		if ( timeUp ) {
-			CompleteAttempt( OUTCOME_SUCCESS, 1.0, va( "survived %d s undetected", attempt.limitSeconds ) );
+			CompleteAttempt( OUTCOME_TIMEOUT, target > 0 ? Min( 1.0, (double)s.lootFound / target ) : 0.0, va( "%d/%d loot (target %d) when time ran out (%s)", s.lootFound, s.lootTotal, target, statsLine ) );
 			return;
 		}
-	} else if ( attempt.challengeId == CH_FREE_ROAM ) {
+	} else if ( id == CH_KNOCKOUT ) {
+		int count = (int)attempt.vars["count"].i;
+		if ( s.kills > 0 ) {
+			CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "someone was killed (%s)", statsLine ) );
+			return;
+		}
+		if ( s.knockouts >= count ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "%d knockouts (%s)", s.knockouts, statsLine ) );
+			return;
+		}
 		if ( timeUp ) {
-			CompleteAttempt( OUTCOME_SUCCESS, attempt.distanceUnits * UNITS_TO_METERS, va( "travelled %.1f m", attempt.distanceUnits * UNITS_TO_METERS ) );
+			CompleteAttempt( OUTCOME_TIMEOUT, count > 0 ? (double)s.knockouts / count : 0.0, va( "%d/%d knockouts when time ran out (%s)", s.knockouts, count, statsLine ) );
+			return;
+		}
+	} else if ( id == CH_EXPLORE ) {
+		if ( timeUp ) {
+			int total = missions[attempt.mission].locationNames.Num();
+			double frac = total > 0 ? (double)attempt.visited.size() / total : 0.0;
+			CompleteAttempt( OUTCOME_SUCCESS, frac, va( "visited %d of %d areas, travelled %.0f m (%s)", (int)attempt.visited.size(), total, attempt.distanceUnits * UNITS_TO_METERS, statsLine ) );
 			return;
 		}
 	}
 
 	if ( timeUp ) {
-		CompleteAttempt( OUTCOME_TIMEOUT, 0.0, va( "time limit of %d s reached", attempt.limitSeconds ) );
+		CompleteAttempt( OUTCOME_TIMEOUT, 0.0, va( "time limit of %d s reached (%s)", attempt.limitSeconds, statsLine ) );
 	}
 }
 
@@ -717,7 +1128,8 @@ void CArcadeIntegration::CompleteAttempt( Outcome outcome, double score, const c
 	state = STATE_IDLE;
 
 	double elapsed = ( gameLocal.time - attempt.startGameTime ) * 0.001;
-	idPlayer *player = gameLocal.GetLocalPlayer();
+	MissionSnapshot s;
+	bool haveStats = Snapshot( s );
 
 	// ChallengeCompleted { 1 challenge_id, 2 run_id, 3 outcome, 4 score, 5 detail, 6 final_metrics[] }
 	ArcadeProto::Writer done;
@@ -726,24 +1138,24 @@ void CArcadeIntegration::CompleteAttempt( Outcome outcome, double score, const c
 	done.Enum( 3, outcome );
 	done.Double( 4, score );
 	done.String( 5, detail );
-	{
+	struct { const char *name; double value; } finals[] = {
+		{ "time/elapsed_s", elapsed },
+		{ "player/distance_travelled_m", attempt.distanceUnits * UNITS_TO_METERS },
+		{ "ai/max_alert_index", attempt.maxAlertSeen },
+		{ "explore/locations_visited", (double)attempt.visited.size() },
+		{ "mission/stealth_score", haveStats ? s.stealthScore : 0.0 },
+		{ "mission/times_seen", haveStats ? s.timesSeen : 0.0 },
+		{ "mission/loot_fraction", haveStats && s.lootTotal > 0 ? (double)s.lootFound / s.lootTotal : 0.0 },
+		{ "player/loot", haveStats ? s.lootFound : 0.0 },
+		{ "ai/knockouts", haveStats ? s.knockouts : 0.0 },
+		{ "ai/kills", haveStats ? s.kills : 0.0 },
+		{ "mission/objectives_complete", haveStats ? s.objectivesMandatoryComplete : 0.0 },
+		{ "mission/damage_received", haveStats ? s.damageReceived : 0.0 },
+	};
+	for ( size_t i = 0; i < sizeof( finals ) / sizeof( finals[0] ); i++ ) {
 		ArcadeProto::Writer m;
-		m.String( 1, "time/elapsed_s" ); m.Double( 2, elapsed );
-		done.PutMessage( 6, m );
-	}
-	{
-		ArcadeProto::Writer m;
-		m.String( 1, "player/distance_travelled_m" ); m.Double( 2, attempt.distanceUnits * UNITS_TO_METERS );
-		done.PutMessageAlways( 6, m );
-	}
-	{
-		ArcadeProto::Writer m;
-		m.String( 1, "ai/max_alert_index" ); m.Double( 2, attempt.maxAlertSeen );
-		done.PutMessageAlways( 6, m );
-	}
-	if ( player ) {
-		ArcadeProto::Writer m;
-		m.String( 1, "player/loot" ); m.Double( 2, PlayerLoot( player ) );
+		m.String( 1, finals[i].name );
+		m.Double( 2, finals[i].value );
 		done.PutMessageAlways( 6, m );
 	}
 
@@ -843,11 +1255,18 @@ void CArcadeIntegration::HandleGetPlayerState( uint64_t reqId ) {
 }
 
 void CArcadeIntegration::HandleListLocations( uint64_t reqId ) {
+	int m = CurrentMissionIndex();
+	if ( m < 0 || !missions[m].available ) {
+		Fail( reqId, "no arcade mission map loaded" );
+		return;
+	}
 	ArcadeProto::Writer resp;
-	for ( int i = 0; i < locationNames.Num(); i++ ) {
+	const MissionRuntime &rt = missions[m];
+	for ( int i = 0; i < rt.locationNames.Num(); i++ ) {
 		ArcadeProto::Writer loc;
-		loc.String( 1, locationNames[i].c_str() );
-		WriteVec3( loc, 2, locationOrigins[i] );
+		loc.String( 1, rt.locationNames[i].c_str() );
+		WriteVec3( loc, 2, rt.locationOrigins[i] );
+		loc.String( 3, LocationDisplayName( m, rt.locationNames[i].c_str() ) );
 		resp.PutMessageAlways( 1, loc );
 	}
 	Respond( reqId, resp );
@@ -892,6 +1311,45 @@ void CArcadeIntegration::HandleExecConsoleCommand( uint64_t reqId, ArcadeProto::
 	Log( LOG_INFO, "console command from controller: %s", command.c_str() );
 	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, ( command + "\n" ).c_str() );
 	Respond( reqId, ArcadeProto::Writer() );
+}
+
+void CArcadeIntegration::HandleGetMissionState( uint64_t reqId ) {
+	MissionSnapshot s;
+	if ( !Snapshot( s ) ) {
+		Fail( reqId, "no map loaded" );
+		return;
+	}
+	CMissionData *md = gameLocal.m_MissionData.get();
+	ArcadeProto::Writer resp;	// MissionState, see vendor.proto
+	if ( s.mission >= 0 ) resp.String( 1, MISSIONS[s.mission].id );
+	idStr map = gameLocal.GetMapName();
+	map.StripPath();
+	map.StripFileExtension();
+	resp.String( 2, map.c_str() );
+	resp.Int32( 3, s.difficulty );
+	resp.Int32( 4, s.result );
+	for ( int i = 0; i < md->GetNumObjectives(); i++ ) {
+		const CObjective &obj = md->GetObjective( i );
+		ArcadeProto::Writer o;
+		o.Int32( 1, i + 1 );
+		o.String( 2, common->Translate( obj.m_text.c_str() ) );
+		o.PutBool( 3, obj.m_bMandatory );
+		o.PutBool( 4, obj.m_bVisible );
+		o.PutBool( 5, obj.m_bApplies );
+		o.Int32( 6, md->GetCompletionState( i ) );
+		resp.PutMessageAlways( 5, o );
+	}
+	resp.Int32( 6, s.lootFound );
+	resp.Int32( 7, s.lootTotal );
+	resp.Float( 8, s.stealthScore );
+	resp.Int32( 9, s.timesSeen );
+	resp.Int32( 10, s.timesSuspicious );
+	resp.Int32( 11, s.timesSearched );
+	resp.Int32( 12, s.knockouts );
+	resp.Int32( 13, s.kills );
+	resp.Int32( 14, s.damageReceived );
+	resp.Int32( 15, s.pocketsPicked );
+	Respond( reqId, resp );
 }
 
 // ===========================================================================
@@ -939,15 +1397,18 @@ void CArcadeIntegration::ResetObservers() {
 	lastLoot = 0;
 	lastHealth = 0;
 	wasDead = false;
-	missionCompleteReported = false;
+	lastMissionResult = MISSION_INPROGRESS;
+	lastKnockouts = 0;
+	lastKills = 0;
 	lastLocation = "";
+	lastObjectiveStates.clear();
 	lastAiAlert.clear();
 	lastMetricsPushMs = 0;
 }
 
 void CArcadeIntegration::Observe() {
-	gameState_t gs = gameLocal.GameState();
-	if ( gs != GAMESTATE_ACTIVE && gs != GAMESTATE_COMPLETED ) {
+	MissionSnapshot s;
+	if ( !Snapshot( s ) ) {
 		observedGeneration = -1;
 		return;
 	}
@@ -955,6 +1416,7 @@ void CArcadeIntegration::Observe() {
 	if ( !player ) {
 		return;
 	}
+	CMissionData *md = gameLocal.m_MissionData.get();
 
 	if ( observedGeneration != mapGeneration ) {
 		// first frame on a new map
@@ -964,6 +1426,11 @@ void CArcadeIntegration::Observe() {
 		lastHealth = player->health;
 		wasDead = player->health <= 0;
 		lastLocation = PlayerLocationName( player );
+		lastMissionResult = s.result;
+		lastKnockouts = s.knockouts;
+		lastKills = s.kills;
+		lastObjectiveStates.assign( s.objectivesTotal, STATE_INCOMPLETE );
+		for ( int i = 0; i < s.objectivesTotal; i++ ) lastObjectiveStates[i] = md->GetCompletionState( i );
 		ArcadeProto::Writer ev;
 		ev.String( 1, gameLocal.GetMapName() );
 		ReportEvent( EV_MAP_LOADED, ev );
@@ -1035,11 +1502,47 @@ void CArcadeIntegration::Observe() {
 		}
 	}
 
-	// mission end
-	if ( gs == GAMESTATE_COMPLETED && !missionCompleteReported ) {
-		missionCompleteReported = true;
-		ReportEvent( EV_MISSION_COMPLETED, ArcadeProto::Writer() );
+	// knockouts / kills (from the mission statistics)
+	if ( s.knockouts > lastKnockouts ) {
+		ArcadeProto::Writer ev;
+		ev.Int32( 1, s.knockouts );
+		ReportEvent( EV_AI_KNOCKED_OUT, ev );
 	}
+	lastKnockouts = s.knockouts;
+	if ( s.kills > lastKills ) {
+		ArcadeProto::Writer ev;
+		ev.Int32( 1, s.kills );
+		ReportEvent( EV_AI_KILLED, ev );
+	}
+	lastKills = s.kills;
+
+	// objectives
+	if ( (int)lastObjectiveStates.size() != s.objectivesTotal ) {
+		lastObjectiveStates.assign( s.objectivesTotal, STATE_INCOMPLETE );
+	}
+	for ( int i = 0; i < s.objectivesTotal; i++ ) {
+		int st = md->GetCompletionState( i );
+		if ( st != lastObjectiveStates[i] ) {
+			ArcadeProto::Writer ev;
+			ev.Int32( 1, i + 1 );
+			ev.String( 2, common->Translate( md->GetObjective( i ).m_text.c_str() ) );
+			ev.Int32( 3, st );
+			ev.Int32( 4, lastObjectiveStates[i] );
+			ReportEvent( EV_OBJECTIVE_CHANGED, ev );
+			lastObjectiveStates[i] = st;
+		}
+	}
+
+	// mission end
+	if ( s.result != lastMissionResult && ( s.result == MISSION_COMPLETE || s.result == MISSION_FAILED ) ) {
+		ArcadeProto::Writer ev;
+		ev.Int32( 1, s.result );
+		ReportEvent( EV_MISSION_ENDED, ev );
+		if ( s.result == MISSION_COMPLETE ) {
+			ReportEvent( EV_MISSION_COMPLETED, ArcadeProto::Writer() );
+		}
+	}
+	lastMissionResult = s.result;
 
 	// metrics
 	int now = Sys_Milliseconds();
@@ -1050,8 +1553,14 @@ void CArcadeIntegration::Observe() {
 		sdk.push_f32_metric( mLoot, (float)loot, t );
 		sdk.push_f32_metric( mLightgem, player->GetCurrentLightgemValue() / LIGHTGEM_MAX, t );
 		sdk.push_f32_metric( mMaxAlert, (float)maxAlert, t );
+		sdk.push_f32_metric( mStealthScore, s.stealthScore, t );
+		sdk.push_f32_metric( mLootFraction, s.lootTotal > 0 ? (float)s.lootFound / s.lootTotal : 0.0f, t );
+		sdk.push_f32_metric( mKnockouts, (float)s.knockouts, t );
+		sdk.push_f32_metric( mKills, (float)s.kills, t );
+		sdk.push_f32_metric( mObjectivesComplete, (float)s.objectivesMandatoryComplete, t );
 		if ( state == STATE_RUNNING ) {
 			sdk.push_f32_metric( mDistance, attempt.distanceUnits * UNITS_TO_METERS, t );
+			sdk.push_f32_metric( mLocationsVisited, (float)attempt.visited.size(), t );
 		}
 	}
 }

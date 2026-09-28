@@ -8,7 +8,12 @@
 #   GAME_DIR   where the TDM assets + thedarkmod.x64 live   (default: ../../darkmod, i.e. CMake's GAME_DIR)
 #   EXE        engine executable to ship                   (default: $GAME_DIR/thedarkmod.x64)
 #   SDK_LIB    libarcade_sdk.so to ship                    (default: ../ThirdParty/arcade_sdk/linux_64/libarcade_sdk.so, see fetch_sdk.sh)
-#   MISSIONS   fms/ subfolders to include                  (default: "training_mission stlucia newjob")
+#
+# The two official missions ship as ONE fan mission folder, fms/arcade: both pk4s
+# plus the override files in fm_overrides/ (a merged custom-scripts include, sound
+# shaders and subtitles, since the pk4s each define those). Loose files in the FM
+# folder take precedence over the pk4s, so either map can be loaded by name and the
+# game never needs to switch fs_currentfm (which would require a restart).
 #
 # Files are hard-linked where possible, so staging costs almost no disk space.
 set -eu
@@ -18,7 +23,7 @@ REPO=$(cd "$HERE/.." && pwd)
 GAME_DIR=${GAME_DIR:-"$REPO/../darkmod"}
 EXE=${EXE:-"$GAME_DIR/thedarkmod.x64"}
 SDK_LIB=${SDK_LIB:-"$REPO/ThirdParty/arcade_sdk/linux_64/libarcade_sdk.so"}
-MISSIONS=${MISSIONS:-"training_mission stlucia newjob"}
+MISSIONS="newjob stlucia"
 OUT="$HERE/out/client"
 
 BUILD_ID=$(sed -n 's/^build_id *= *"\([^"]*\)".*/\1/p' "$HERE/arcade.toml" | head -1)
@@ -43,10 +48,14 @@ for f in config.spec darkmod.ini alsoft.ini alsoft-hrtf-default-44100.mhr alsoft
          ca-bundle.crt description.txt AUTHORS.txt LICENSE.txt TDM_icon.ico darkmod.ico; do
 	[ -f "$GAME_DIR/$f" ] && link "$GAME_DIR/$f" "$OUT/$f"
 done
+mkdir -p "$OUT/fms/arcade"
 for m in $MISSIONS; do
-	[ -d "$GAME_DIR/fms/$m" ] || { echo "mission not installed: $GAME_DIR/fms/$m" >&2; exit 1; }
-	mkdir -p "$OUT/fms/$m"
-	for f in "$GAME_DIR/fms/$m"/*.pk4; do link "$f" "$OUT/fms/$m/$(basename "$f")"; done
+	[ -d "$GAME_DIR/fms/$m" ] || { echo "mission not installed: $GAME_DIR/fms/$m (install it with the TDM mission downloader)" >&2; exit 1; }
+	for f in "$GAME_DIR/fms/$m"/*.pk4; do link "$f" "$OUT/fms/arcade/$(basename "$f")"; done
+done
+(cd "$HERE/fm_overrides" && find . -type f) | while read -r f; do
+	mkdir -p "$OUT/fms/arcade/$(dirname "$f")"
+	cp "$HERE/fm_overrides/$f" "$OUT/fms/arcade/$f"
 done
 
 cp "$REPO/game/Arcade/vendor.proto" "$OUT/vendor.proto"

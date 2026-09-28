@@ -1,0 +1,38 @@
+// Merged for the arcade build: A New Job + Saint Lucia
+
+subtitles fm_root
+{
+    verbosity story
+    inline "sound/map_specific/vo1_backalley.ogg" "The back alleys of Bridgeport. You can get almost anywhere unseen, if you know your way through the maze."
+    inline "sound/map_specific/vo3_stack.ogg" "I can probably get up on that pipe if I can find something to stack."
+    inline "sound/map_specific/vo4_mainstreets.ogg" "The City Watch makes the main streets a lot riskier. Even regular citizens might raise a hue and cry if they see someone dressed like me."
+    inline "sound/map_specific/vo5_helmet.ogg" "There's the tavern. That guard in front is the problem. I'll need to distract him or find another way in."
+    inline "sound/map_specific/vo_oneeye.ogg" "A one-eyed guard. This must be my lucky day."
+    inline "sound/map_specific/vo_contact.ogg" "That's where I'm supposed to meet my contact. Looks like he's not here yet."
+    inline "sound/map_specific/vo_privy.ogg" "Hmph. I've seen worse."
+    inline "sound/map_specific/vo_workdone.ogg" "My work here is done. Time to meet my contact."
+    inline "sound/map_specific/convo1_01hassling.ogg" "The old man says the Builders are harrassing the girls behind the Inn. Says it's bad for business"
+    inline "sound/map_specific/convo1_02a_court.ogg" "What does he want us to do about it? Builders don't carry those hammers for decoration you know. They'll bash your skull in right quick and who's going to stop them?"
+    inline "sound/map_specific/convo1_02b_court.ogg" "You think a Church court'll hang one of their own? A wink and a rap on the knuckles, that's what they'll get, and they'll be back on the street by breakfast."
+    inline "sound/map_specific/convo1_03dog.ogg" "The City needs to put a stop to it! You let a dog roam free in the kitchen long enough and soon he thinks he owns all the food."
+    inline "sound/map_specific/convo3_1.ogg" "Hey did you see the Moorish guards they have protecting the vizier?"
+    inline "sound/map_specific/convo3_2.ogg" "I wonder what those curved swords would be like in a fight?"
+    inline "sound/map_specific/jack_convo1_01.ogg" "I heard those swords are just for show."
+    inline "sound/map_specific/jack_convo1_02.ogg" "They say the Moors can use magic to summon genies and wind and stuff."
+    inline "sound/map_specific/convo3_4.ogg" "They fight by summoning genies. What do they do huh? Rub a lamp?"
+    inline "sound/map_specific/jack_convo1_03.ogg" "And winds. They can summon really really strong winds."
+    inline "sound/map_specific/convo3_6.ogg" "Oh sure. Better make sure the washer wench doesn't pick a fight with one on laundry day then."
+    inline "sound/voices/jack/cheeky_git.ogg" "Cheeky git."
+    inline "sound/map_specific/convo2_1.ogg" "You read in the papers about that statue weeping blood?"
+    inline "sound/map_specific/jack_convo2_01.ogg" "Yeah. My uncle went and saw it. Said it cured his gout."
+    inline "sound/map_specific/convo2_3.ogg" "Hmm. I wonder if it will put that hospital out of business."
+    inline "sound/map_specific/jack_convo2_02.ogg" "You mean Belhaven?"
+    inline "sound/map_specific/jack_convo2_03.ogg" "It'd be out of business already if Lord Belhaven wasn't paying for the whole thing himself."
+    inline "sound/voices/commander/that_you.ogg" "Corbin? Is that you?"
+    inline "sound/voices/commander/follow_me.ogg" "If you'll follow me we can talk about the details"
+    srt "sound/briefing/briefing.ogg" "subtitles/briefing.srt"
+    srt "sound/voices/player/player_briefing.ogg" "subtitles/player_briefing.srt"
+    inline "sound/map_specific/vo_backdoor.ogg" "Great. This isn't the back door I had in mind."
+    inline "sound/map_specific/vo_guard.ogg" "That guard is going to be a challenge. I wonder if there is a less obvious way in?"
+    inline "sound/map_specific/vo_hammer.ogg" "Hmm... A good, solid push might tip that hammer over..."
+}

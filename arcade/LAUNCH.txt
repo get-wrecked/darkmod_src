@@ -2,12 +2,12 @@ The Dark Mod 2.15 + arcade SDK integration (build @BUILD_ID@), Linux x86_64
 
 Build id:          thedarkmod@@BUILD_ID@
 Launch:            ./run_arcade.sh        (reads SCREEN_WIDTH / SCREEN_HEIGHT, default 2560x1440; plain X11 window, not exclusive fullscreen)
-Equivalent:        ./thedarkmod.x64 +set arcade_enable 1 +set arcade_buildId @BUILD_ID@ +set fs_currentfm training_mission +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440 +set tdm_player_wait_until_ready 0
-Ready state:       main menu; StartChallenge loads the mission map itself (~4 s), no clicks needed.
+Equivalent:        ./thedarkmod.x64 +set arcade_enable 1 +set arcade_buildId @BUILD_ID@ +set fs_currentfm arcade +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440 +set tdm_player_wait_until_ready 0
+Ready state:       main menu; StartChallenge loads the requested mission map itself (prologue9 or saintlucia, 4-6 s), sets the difficulty, no clicks needed.
 SDK:               libarcade_sdk.so @SDK_VERSION@ next to the executable; port 6006 (ARCADE_SDK_PORT); log arcade_sdk.log next to the executable.
 Schema:            vendor.proto (service thedarkmod.v1.Game, event union thedarkmod.v1.GameEvent).
-Challenges:        reach-location, collect-loot, stay-hidden, free-roam -- see ARCADE_README.md.
-Other missions:    +set fs_currentfm stlucia  or  +set fs_currentfm newjob (challenges then run on that mission's start map).
+Challenges:        complete-mission, newjob-objective, stlucia-objective, newjob-reach, stlucia-reach, steal-loot, knockout, explore -- see ARCADE_README.md.
+Missions:          fms/arcade holds "A New Job" (map prologue9) and "Tears of St. Lucia" (map saintlucia) as one fan mission folder.
 Requirements:      OpenGL 3.3 on X11, glibc 2.39+; libX11, libxcb, libstdc++ from the system. Offline, no installer, no login, no sudo.
 Config/saves:      written to ~/.local/share/darkmod (fs_savepath) unless +set fs_savepath <dir> is given.
 Focus:             the game keeps running when the window loses focus.

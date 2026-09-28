@@ -1,0 +1,3 @@
+Title: The Dark Mod arcade missions
+Description: A New Job (prologue9) and Tears of St. Lucia (saintlucia) packaged as one fan mission for the arcade game SDK build, so either map can be loaded by name. Original missions by Springheel and Jdude.
+Author: Springheel & Jdude (missions); arcade packaging by the TDM arcade integration

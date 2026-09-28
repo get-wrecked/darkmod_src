@@ -9,7 +9,8 @@ cvars); this directory is the packaging and submission side.
 | `arcade.toml` | The build layout the `arcade-sdk` CLI reads: game id, **build id**, notes, client dir and entrypoint. |
 | `run_arcade.sh` | The client entrypoint (template; `@BUILD_ID@` is filled in when staging). Opens a plain X11 window sized from `SCREEN_WIDTH`/`SCREEN_HEIGHT`, starts straight into the main menu with the SDK enabled. |
 | `LAUNCH.txt` | Human-readable notes shipped with the build. |
-| `stage_build.sh` | Assembles `out/client/` from the built engine, the SDK library, game data and missions. |
+| `stage_build.sh` | Assembles `out/client/` from the built engine, the SDK library, game data and the two missions (as the combined `fms/arcade` folder). |
+| `fm_overrides/` | Loose files for `fms/arcade` that resolve collisions between the two mission pk4s: the merged `tdm_custom_scripts.script` include list, merged sound shaders and subtitles, `darkmod.txt`. Loose files override pk4 contents. |
 | `fetch_sdk.sh` | Downloads the pinned SDK release: the shared library into `ThirdParty/arcade_sdk/linux_64/` and the CLI into `tools/`. |
 
 `out/`, `tools/`, `arcade-registration.json` and the SDK `.so` are not committed.
@@ -53,7 +54,7 @@ include path and library copy in `CMakeLists.txt`. Everything else is additive.
 ## Local testing
 
 ```bash
-cd ../darkmod && ARCADE_SDK_NO_DEBUG_UI=1 ./thedarkmod.x64 +set arcade_enable 1 +set fs_currentfm training_mission +set r_fullscreen 0
+cd ../darkmod && ARCADE_SDK_NO_DEBUG_UI=1 ./thedarkmod.x64 +set arcade_enable 1 +set fs_currentfm arcade +set r_fullscreen 0
 ../darkmod_src/arcade/tools/arcade-sdk-debug --sdk-addr 127.0.0.1:6006 --port 6060 --no-browser   # UI at http://127.0.0.1:6060
 ```
 

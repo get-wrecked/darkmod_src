@@ -1,0 +1,473 @@
+// Merged for the arcade build: Saint Lucia definitions, plus the shaders only A New Job defines.
+// Both missions ship as one fan mission folder so either map can be loaded.
+
+//=================================================
+//Conversations for
+//=================================================
+
+
+city_bustle_distant01__quiet_loop
+{
+	editor_displayFolder	ambient/environmental/city
+
+    volume -7
+    minDistance 9
+    maxDistance 30
+    looping
+
+    sound/ambient/environmental/city_bustle_distant_loop01.ogg
+
+}
+
+vo1_backalley
+{
+
+
+
+	editor_displayFolder  map_specific
+
+	sound/map_specific/vo1_backalley.ogg
+
+}
+
+
+vo2_starve
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo2_starve.ogg
+
+}
+
+vo3_stack
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo3_stack.ogg
+
+}
+
+vo4_drop
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo4_drop.ogg
+
+}
+
+
+vo4_mainstreets
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo4_mainstreets.ogg
+
+}
+
+
+
+vo5_helmet
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo5_helmet.ogg
+
+}
+
+
+vo_oneeye
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo_oneeye.ogg
+
+}
+
+vo_contact
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo_contact.ogg
+
+}
+
+
+vo_boards
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo_boards.ogg
+
+}
+
+vo_privy
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo_privy.ogg
+
+}
+
+vo_room
+{
+
+
+
+	editor_displayFolder	 map_specific
+
+	sound/map_specific/vo_room.ogg
+
+}
+
+
+
+ //---------------------------------------
+ // Conversations
+ //-------------------------------------
+
+
+
+convo1_01
+{
+
+
+
+	editor_displayFolder  map_specific
+        volume -5
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo1_01hassling.ogg
+
+}
+
+convo1_02
+{
+
+
+
+	editor_displayFolder  map_specific
+        minDistance 1
+maxDistance 25
+        
+
+	sound/map_specific/convo1_02court.ogg
+
+}
+
+convo1_03
+{
+
+
+
+	editor_displayFolder  map_specific
+        volume -5
+
+        minDistance 1
+maxDistance 25
+	sound/map_specific/convo1_03dog.ogg
+
+}
+
+convo1_04
+{
+
+
+
+	editor_displayFolder  map_specific
+        minDistance 1
+maxDistance 25
+
+
+	sound/map_specific/convo1_04drinking.ogg
+
+}
+
+convo1_05
+{
+
+
+
+	editor_displayFolder  map_specific
+        volume -5
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo1_05da.ogg
+
+}
+
+convo1_06
+{
+
+
+
+	editor_displayFolder  map_specific
+        minDistance 1
+maxDistance 25
+
+
+	sound/map_specific/convo1_06world.ogg
+
+}
+
+
+convo3_01
+ {
+    	editor_displayFolder  map_specific
+       
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_1.ogg
+
+}
+
+convo3_02
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_2.ogg
+}
+
+convo3_03
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_3.ogg
+}
+
+convo3_04
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_4.ogg
+}
+convo3_05
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_7.ogg
+}
+convo3_06
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo3_6.ogg
+}
+
+convo3_07
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/voices/jack/cheeky_git.ogg
+}
+
+//--------------
+// bar convo 2
+
+convo2_01
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo2_1.ogg
+}
+
+convo2_02
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo2_2.ogg
+}
+
+
+convo2_03
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo2_3.ogg
+}
+
+
+convo2_04
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+
+	sound/map_specific/convo2_4.ogg
+}
+
+
+
+
+
+// saint Lucia lines
+
+
+
+vo_guardproblem
+{
+
+
+
+	editor_displayFolder	 map_specific
+        omnidirectional
+	sound/map_specific/vo_guard.ogg
+    no_efx                       //do NOT apply EFX to this sound
+
+}
+
+
+
+
+
+vo_backdoor
+{
+
+
+
+	editor_displayFolder	 map_specific
+        omnidirectional
+	sound/map_specific/vo_backdoor.ogg
+    no_efx                       //do NOT apply EFX to this sound
+
+}
+
+
+vo_hammer
+{
+
+
+
+	editor_displayFolder	 map_specific
+        omnidirectional
+	sound/map_specific/vo_hammer.ogg
+    no_efx                       //do NOT apply EFX to this sound
+
+}
+
+// --- from A New Job ---
+
+convo1_02a
+{
+
+
+
+	editor_displayFolder  map_specific
+        minDistance 1
+maxDistance 25
+         volume 0
+
+	sound/map_specific/convo1_02a_court.ogg
+
+}
+
+convo1_02b
+{
+
+
+
+	editor_displayFolder  map_specific
+        minDistance 1
+maxDistance 25
+         volume 0
+
+	sound/map_specific/convo1_02b_court.ogg
+
+}
+
+convo3_03_1
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+   volume -3
+
+	sound/map_specific/jack_convo1_02.ogg
+}
+
+convo2_05
+ {
+    	editor_displayFolder  map_specific
+
+        minDistance 1
+maxDistance 25
+   volume -3
+
+	sound/map_specific/jack_convo2_03.ogg
+}
+
+briefing
+{
+	editor_displayFolder	 map_specific
+	volume 3
+
+        omnidirectional
+	sound/briefing/briefing.ogg
+}
+
+music_briefing
+{
+
+    volume -10
+
+    looping
+     sound/ambient/ambience/city_streets02_loop.ogg
+}

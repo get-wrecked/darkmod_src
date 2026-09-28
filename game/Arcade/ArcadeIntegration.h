@@ -19,8 +19,12 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "ArcadeProto.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
+
+class idAI;
+class idPlayer;
 
 /**
  * Arcade game SDK integration (see ThirdParty/arcade_sdk/README_SDK.md).
@@ -29,12 +33,16 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
  * loopback endpoint through which external tooling starts "challenges", calls
  * RPCs into the game, and receives reports (events, metrics, outcomes).
  *
+ * Challenges run on the two official missions shipped with the arcade build,
+ * "A New Job" (map prologue9) and "Tears of St. Lucia" (map saintlucia). Both
+ * are packaged as one fan mission folder (see arcade/stage_build.sh) so either
+ * map can be loaded by name; StartChallenge reloads the chosen map for a clean
+ * world, sets the difficulty, and judges the attempt from the game's own
+ * objective system and mission statistics.
+ *
  * Enabled with "+set arcade_enable 1" on the command line and the SDK shared
  * library next to the executable. Everything runs on the main thread, driven by
  * Frame() once per engine frame.
- *
- * Challenges all run on the starting map of the currently installed fan mission
- * (fs_currentfm); StartChallenge reloads that map for a clean state.
  */
 class CArcadeIntegration {
 public:
@@ -55,6 +63,25 @@ public:
 
 	bool IsActive() const { return active; }
 
+	// --- static mission knowledge (see ArcadeIntegration.cpp)
+	struct MissionInfo {
+		const char *id;			// variation value, e.g. "newjob"
+		const char *map;		// map name without path/extension
+		const char *display;	// "A New Job"
+		const char *summary;	// one paragraph of context given to the agent
+	};
+	struct ObjectiveSpec {
+		const char *mission;
+		const char *slug;		// variation value, e.g. "steal-rubies"
+		int indices[3];			// 1-based objective indices that count (alternatives, 0-terminated)
+		const char *summary;	// what the agent is told
+	};
+	struct LocationSpec {
+		const char *mission;
+		const char *entity;		// info_location entity name
+		const char *display;	// "the church kitchen"
+	};
+
 private:
 	enum State {
 		STATE_IDLE,
@@ -68,6 +95,12 @@ private:
 		OUTCOME_FAILURE = 2,
 		OUTCOME_TIMEOUT = 3,
 		OUTCOME_ABORTED = 4,
+	};
+
+	enum StealthRule {
+		STEALTH_ANY,		// no constraint
+		STEALTH_UNSEEN,		// fail if any AI searches for or spots the player
+		STEALTH_GHOST,		// fail if any AI even becomes suspicious
 	};
 
 	struct VarValue {
@@ -86,21 +119,38 @@ private:
 		std::string runId;
 		uint64_t seed;
 		VarMap vars;
+		int mission;				// index into the mission table
+		int difficulty;				// 0..2
+		int limitSeconds;
+		StealthRule stealth;
 		uint64_t pendingRequestId;	// StartChallenge request awaiting the map load
 		int mapGenerationAtRequest;
 		int loadIssuedMs;			// Sys_Milliseconds when the map command was queued
 		int startGameTime;			// gameLocal.time when the attempt started
-		int limitSeconds;
 		idVec3 lastOrigin;
 		float distanceUnits;
 		int maxAlertSeen;
-		Attempt() : seed( 0 ), pendingRequestId( 0 ), mapGenerationAtRequest( 0 ), loadIssuedMs( 0 ),
-			startGameTime( 0 ), limitSeconds( 0 ), lastOrigin( vec3_origin ), distanceUnits( 0.0f ), maxAlertSeen( 0 ) {}
+		std::set<std::string> visited;	// explore: distinct info_location names entered
+		Attempt() : seed( 0 ), mission( -1 ), difficulty( 0 ), limitSeconds( 0 ), stealth( STEALTH_ANY ),
+			pendingRequestId( 0 ), mapGenerationAtRequest( 0 ), loadIssuedMs( 0 ), startGameTime( 0 ),
+			lastOrigin( vec3_origin ), distanceUnits( 0.0f ), maxAlertSeen( 0 ) {}
+	};
+
+	// Snapshot of what the game reports about the current map; see MissionState in vendor.proto.
+	struct MissionSnapshot {
+		int mission;			// table index or -1
+		int difficulty;
+		int result;				// EMissionResult
+		int lootFound, lootTotal;
+		float stealthScore;
+		int timesSeen, timesSuspicious, timesSearched;
+		int knockouts, kills, damageReceived, pocketsPicked;
+		int objectivesTotal, objectivesMandatory, objectivesMandatoryComplete;
 	};
 
 	// --- setup
 	void BuildInitRequest( ArcadeProto::Writer &out );
-	void ParseMissionLocations();
+	void DiscoverMissions();
 	void ResolveMetricHandles();
 
 	// --- request handling
@@ -114,22 +164,32 @@ private:
 	void HandleListLocations( uint64_t reqId );
 	void HandleListAi( uint64_t reqId );
 	void HandleExecConsoleCommand( uint64_t reqId, ArcadeProto::Reader req );
+	void HandleGetMissionState( uint64_t reqId );
 	void Respond( uint64_t reqId, const ArcadeProto::Writer &msg );
 	void Fail( uint64_t reqId, const char *fmt, ... ) id_attribute( ( format( printf, 3, 4 ) ) );
 
 	// --- challenge state machine
+	bool ValidateAttempt( const Attempt &a, std::string &error ) const;
 	void AdvanceLoading();
 	void StartRunning();
 	void Judge();
 	void CompleteAttempt( Outcome outcome, double score, const char *detail );
-	std::string ResolveInstruction( const std::string &challengeId, const VarMap &vars ) const;
+	std::string ResolveInstruction( const Attempt &a ) const;
 	const char *ChallengeInstructionTemplate( const std::string &challengeId ) const;
-	int AlertThresholdFromName( const std::string &name ) const;
+	bool IsMissionChallenge( const std::string &id ) const;	// has a "mission" variation
+	int MissionIndexForChallenge( const std::string &id ) const;	// for per-mission ids, else -1
+	const ObjectiveSpec *FindObjectiveSpec( int mission, const std::string &slug ) const;
+	const LocationSpec *FindLocationSpec( int mission, const std::string &entity ) const;
+	const char *LocationDisplayName( int mission, const char *entity ) const;
+	bool ObjectiveSpecComplete( const ObjectiveSpec &spec, bool &failed, std::string &text ) const;
+	float StealthFactor( const MissionSnapshot &s ) const;
+	bool StealthViolated( const MissionSnapshot &s, StealthRule rule, const char *&why ) const;
 
 	// --- observation
 	void Observe();
 	void ResetObservers();
-	void PushMetrics();
+	bool Snapshot( MissionSnapshot &out ) const;
+	int CurrentMissionIndex() const;
 	int MaxAiAlertIndex( idAI **culprit = nullptr ) const;
 	int PlayerLoot( idPlayer *player ) const;
 	const char *PlayerLocationName( idPlayer *player ) const;
@@ -153,22 +213,31 @@ private:
 	int mapGeneration;			// bumped on every InitFromNewMap
 	int observedGeneration;
 
-	// mission data gathered at Init
-	idStr startingMap;
-	idStrList locationNames;
-	idList<idVec3> locationOrigins;
+	// missions found in the search path at Init: index into the mission table -> locations parsed from its map
+	struct MissionRuntime {
+		bool available;
+		idStrList locationNames;
+		idList<idVec3> locationOrigins;
+		MissionRuntime() : available( false ) {}
+	};
+	std::vector<MissionRuntime> missions;
+	int missionsAvailable;
 
 	// observer memory (per map)
 	int lastLoot;
 	int lastHealth;
 	bool wasDead;
-	bool missionCompleteReported;
+	int lastMissionResult;
+	int lastKnockouts;
+	int lastKills;
 	idStr lastLocation;
+	std::vector<int> lastObjectiveStates;
 	std::map<std::string, int> lastAiAlert;
 	int lastMetricsPushMs;
 
 	// metric handles
 	uint32_t mHealth, mLoot, mLightgem, mMaxAlert, mDistance;
+	uint32_t mStealthScore, mLootFraction, mKnockouts, mKills, mObjectivesComplete, mLocationsVisited;
 
 	std::vector<uint8_t> pollBuf;
 	std::vector<std::vector<uint8_t>> deferredRequests;

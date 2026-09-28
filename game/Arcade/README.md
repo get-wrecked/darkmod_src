@@ -32,8 +32,8 @@ copies it from `ThirdParty/arcade_sdk/linux_64`), install a fan mission, and
 launch straight into the main menu:
 
 ```bash
-./thedarkmod.x64 +set arcade_enable 1 +set fs_currentfm training_mission \
-    +set r_fullscreen 2 +set r_customWidth 2560 +set r_customHeight 1440
+./thedarkmod.x64 +set arcade_enable 1 +set fs_currentfm arcade \
+    +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440
 ```
 
 No menu needs clicking: `StartChallenge` loads the mission's starting map
@@ -80,36 +80,75 @@ idTech4's frame (Z up, right-handed, yaw-pitch-roll); the SDK rejects an init wi
 fullscreen; `arcade-sdk whoami --game-id thedarkmod` shows whether the
 current account may submit.
 
-## Challenges
+## Missions and challenges
 
-All challenges run on the starting map of the installed fan mission
-(`fs_currentfm`); `StartChallenge` reloads it for a clean world and seeds
-`gameLocal.random` from the request. Every attempt fails on player death.
+The arcade build ships the two official missions as one fan mission folder
+(`fms/arcade`, see `arcade/stage_build.sh`): **A New Job** (map `prologue9`,
+mission id `newjob`) and **Tears of St. Lucia** (map `saintlucia`, id `stlucia`).
+Because both maps are in the search path, `StartChallenge` can load either by
+name; switching `fs_currentfm` at runtime would need an engine restart.
+
+Every attempt reloads the chosen map (a clean world), applies the `difficulty`
+variation through the `tdm_difficulty` cvar, seeds `gameLocal.random` from the
+request, skips the "press attack to start" overlay and starts the player at the
+mission start. Judging uses the game's own systems: the objective states in
+`CMissionData`, the mission result, the mission statistics (loot, alerts,
+knockouts, kills) and the `info_location` areas.
 
 | Id | Variations | Success | Failure / Timeout |
 |---|---|---|---|
-| `reach-location` | `location` (enum of the map's `info_location` entity names), `seconds` | Player stands in the target location area. Score `1 - elapsed/limit`. | Timeout. |
-| `collect-loot` | `loot` (25..2000), `seconds` | Carried loot value ≥ target. | Timeout, score `loot/target`. |
-| `stay-hidden` | `seconds`, `max_alert` (`suspicious`, `searching`, `agitated_searching`, `combat`) | Time limit reached. | Any living AI reaches the alert index. |
-| `free-roam` | `seconds` | Time limit reached; score = distance travelled (m). | — |
+| `complete-mission` | `mission`, `difficulty`, `minutes` (10..120) | Mission result COMPLETE (all mandatory objectives). Score `0.5 + 0.5 × stealth`. | Death or mission failed. Timeout scores `0.5 × mandatory objectives done`. |
+| `newjob-objective` | `objective` ∈ enter-tavern, find-clue, steal-rubies, meet-contact; `difficulty`, `minutes` (5..60) | The objective is COMPLETE (alternatives such as the easy/normal journal variants count). Score = stealth factor. | Objective FAILED, death, mission failed, timeout. |
+| `stlucia-objective` | `objective` ∈ steal-relic, damage-statue, loot-quota, escape; `difficulty`, `minutes` | same | same |
+| `newjob-reach`, `stlucia-reach` | `location` (curated `info_location` names), `stealth` ∈ any/unseen/ghost, `difficulty`, `minutes` (2..30) | Player stands in the target area. Score `(0.5 + 0.5 × time left) × stealth`. | Stealth rule broken, death, timeout. |
+| `steal-loot` | `mission`, `percent` (10..100 of the map's total loot), `stealth`, `difficulty`, `minutes` | Loot found ≥ target. Score = stealth factor. | Stealth rule broken, death; timeout scores `found / target`. |
+| `knockout` | `mission`, `count` (1..4), `difficulty`, `minutes` | Knockouts ≥ count with no kills. | Any kill, death; timeout scores `knockouts / count`. |
+| `explore` | `mission`, `difficulty`, `minutes` (3..30) | Always at the time limit; score = distinct named areas visited / areas in the map. | Death. |
+
+Stealth: `unseen` fails the attempt as soon as any AI searches for the player or
+spots them; `ghost` also fails on the first suspicious AI. The stealth factor used
+in scores is `0.25 + 0.75 / (1 + stealthScore / 10)` where `stealthScore` is TDM's
+own weighted alert count (0 for a perfect ghost).
 
 `ChallengeCompleted.final_metrics` carries `time/elapsed_s`,
-`player/distance_travelled_m`, `ai/max_alert_index`, `player/loot`.
+`player/distance_travelled_m`, `ai/max_alert_index`, `explore/locations_visited`,
+`mission/stealth_score`, `mission/times_seen`, `mission/loot_fraction`,
+`player/loot`, `ai/knockouts`, `ai/kills`, `mission/objectives_complete`,
+`mission/damage_received`.
+
+Resolved instructions give the agent the mission premise, the task with the
+variation values spelled out in plain words, and a short controls primer (the
+`CONTROLS_HINT` string in `ArcadeIntegration.cpp`).
+
+Mission knowledge (objective indices per mission, curated locations and their
+plain-English names, mission summaries) lives in the static tables at the top of
+`ArcadeIntegration.cpp`. Objective indices are the mission author's 1-based
+numbering from the map's `atdm:target_addobjectives` entity.
+
+The console command `arcade_probe <entity>` (available when the SDK is enabled)
+prints the player's objective flag and what an objective volume's clip query sees;
+handy when a location objective does not fire where you expect. Note that
+`info_tdm_objective_location` volumes are often small boxes at doorways rather
+than the whole room.
 
 ## Vendor RPCs (`thedarkmod.v1.Game`)
 
-`TeleportPlayer`, `GetPlayerState`, `ListLocations`, `ListAi`,
-`ExecConsoleCommand` — see `vendor.proto` for messages and coordinate
-conventions (Z up, 1 unit = 1 inch, yaw 0 = +X).
+`TeleportPlayer`, `GetPlayerState`, `ListLocations` (with display names),
+`ListAi`, `ExecConsoleCommand`, `GetMissionState` (objectives with states and
+text, loot, stealth score, knockouts, kills, difficulty, result) — see
+`vendor.proto` for messages and coordinate conventions (Z up, 1 unit = 1 inch,
+yaw 0 = +X).
 
 ## Events and metrics
 
 Events (`thedarkmod.v1.GameEvent`): `player_died`, `loot_picked_up`,
 `ai_alert_changed`, `location_changed`, `player_damaged`, `mission_completed`,
-`map_loaded`.
+`map_loaded`, `objective_changed`, `ai_knocked_out`, `ai_killed`, `mission_ended`.
 
 Metrics: `player/health`, `player/loot`, `player/lightgem`,
-`ai/max_alert_index`, `player/distance_travelled_m` (during an attempt).
+`ai/max_alert_index`, `mission/stealth_score`, `mission/loot_fraction`,
+`ai/knockouts`, `ai/kills`, `mission/objectives_complete`, and during an attempt
+`player/distance_travelled_m`, `explore/locations_visited`.
 
 ## Testing
 

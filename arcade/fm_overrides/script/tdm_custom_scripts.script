@@ -1,0 +1,9 @@
+/* Merged for the arcade build: both A New Job (prologue9) and Saint Lucia (saintlucia) ship
+ * in one fan mission folder, so this file includes the custom scripts of both missions
+ * (the union of their tdm_custom_scripts.script files). The numberwheel scripts live in
+ * newjob.pk4; the others are core TDM scripts. */
+#include "script/tdm_ropescroller.script"
+#include "script/ai_trigger_look.script"
+#include "script/trigger_look.script"
+#include "script/tdm_numberwheel.script"
+#include "script/tdm_numberwheel_lock.script"

@@ -133,6 +133,10 @@ public:
 	// Returns the number of objectives
 	int GetNumObjectives() const { return m_Objectives.Num(); };
 
+	// Read-only access to an objective's definition (text, mandatory, visibility, applicability).
+	// Index must be valid (0 <= index < GetNumObjectives()). Used by the arcade SDK integration.
+	const CObjective& GetObjective( int index ) const { return m_Objectives[index]; }
+
 	/**
 	* Update objectives if they need it
 	* Called each frame by idPlayer::Think, does nothing if no objectives need updating

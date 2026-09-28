@@ -7,9 +7,9 @@ game_id = "thedarkmod"
 # This build's version, [A-Za-z0-9._-]. Never reused: bump it for every submit
 # (or pass `arcade-sdk submit --build-id`). stage_build.sh writes the same id into
 # run_arcade.sh (+set arcade_buildId) so the registration and the artifact agree.
-build_id = "2.15-arcade-20260925.2-693d138"
+build_id = "2.15-arcade-20260928-693d138"
 # Recorded on the submission: what changed, what to look at.
-notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration; challenges reach-location, collect-loot, stay-hidden, free-roam on the training mission; service thedarkmod.v1.Game"
+notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration. Challenges now run on the real missions A New Job and Tears of St. Lucia (one combined FM folder): complete-mission, per-mission objective and reach challenges, steal-loot, knockout, explore; judged by the game's objective system and mission statistics. New RPC GetMissionState, new events objective_changed/ai_knocked_out/ai_killed/mission_ended."
 
 # The game the agent plays. It embeds the arcade SDK library.
 [client]
