@@ -2483,6 +2483,11 @@ void idCommonLocal::Frame( void ) {
 
 		eventLoop->RunEventLoop();
 
+		// arcade SDK: serve external-control requests after commands have run, before the game tic
+		if ( game ) {
+			game->ArcadeFrame( false );
+		}
+
 		static int64_t com_frameTimeMicro = 0;		//same as com_frameTime, but in microseconds
 		static int64_t lastFrameAstroTime = Sys_Microseconds();
 		if (sessLocal.com_fixedTic.GetBool()) {
@@ -2559,6 +2564,11 @@ void idCommonLocal::GUIFrame( bool execCmd, bool network ) {
 	Sys_GenerateEvents();
 	eventLoop->RunEventLoop( execCmd );	// and execute any commands
 	com_frameTime = com_ticNumber * USERCMD_MSEC;
+
+	// arcade SDK: keep its liveness tick alive during long operations (map loads)
+	if ( game ) {
+		game->ArcadeFrame( true );
+	}
 
 	session->Frame();
 	session->UpdateScreen( false );	

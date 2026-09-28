@@ -1,0 +1,25 @@
+# The arcade build of The Dark Mod, for `arcade-sdk describe` and `arcade-sdk submit`.
+# Directories are relative to this file; paths inside one are relative to it.
+# Stage the client folder first: ./stage_build.sh (see README.md in this directory).
+
+# Your game id, exactly as the build registers it (InitRequest.game_id).
+game_id = "thedarkmod"
+# This build's version, [A-Za-z0-9._-]. Never reused: bump it for every submit
+# (or pass `arcade-sdk submit --build-id`). stage_build.sh writes the same id into
+# run_arcade.sh (+set arcade_buildId) so the registration and the artifact agree.
+build_id = "2.15-arcade-20260925.2-693d138"
+# Recorded on the submission: what changed, what to look at.
+notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration; challenges reach-location, collect-loot, stay-hidden, free-roam on the training mission; service thedarkmod.v1.Game"
+
+# The game the agent plays. It embeds the arcade SDK library.
+[client]
+dir = "out/client"
+# A script with a #! line: sets arcade_enable, the build id, window size from SCREEN_WIDTH/HEIGHT.
+entrypoint = "run_arcade.sh"
+# Together these must take the game straight into a state where a challenge can
+# start: no launcher, login or menu.
+args = []
+# The .proto source of our services: what benchmarks against them are written from.
+vendor_proto = "vendor.proto"
+# Only linux-x86_64 runs today.
+platform = "linux-x86_64"

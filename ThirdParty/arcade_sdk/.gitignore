@@ -1,0 +1,3 @@
+# the SDK shared library is fetched, not committed (53 MB, changes with every SDK release)
+linux_64/
+windows_64/

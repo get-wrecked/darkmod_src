@@ -996,6 +996,7 @@ public:
 	virtual void			OnVidRestart() override;
 
 	virtual bool			PlayerUnderwater() override; // grayman #3556
+	virtual void			ArcadeFrame( bool insideMapLoad ) override;
 
 	void					AllowImmediateStim( idEntity* e, int stimType ); // grayman #3317
 

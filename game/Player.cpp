@@ -1403,6 +1403,18 @@ void idPlayer::NextInventoryMap()
 	}
 }
 
+void idPlayer::ForceReady()
+{
+	ready = true;
+	forcedReady = true;
+
+	if (m_WaitUntilReadyGuiHandle != OVERLAYS_INVALID_HANDLE)
+	{
+		DestroyOverlay(m_WaitUntilReadyGuiHandle);
+		m_WaitUntilReadyGuiHandle = OVERLAYS_INVALID_HANDLE;
+	}
+}
+
 bool idPlayer::WaitUntilReady()
 {
 	if (IsReady() || !cv_player_wait_until_ready.GetBool())

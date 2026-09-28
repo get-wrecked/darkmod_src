@@ -1,0 +1,332 @@
+// The arcade game SDK's wire schema: what a game registers with the SDK DLL,
+// the RPC envelope the DLL hands the game, and what the game reports back.
+//
+// Compatibility rules (this file is read by shipped DLLs, shipped games, our
+// game machines and the debug app, all at different versions):
+// - Field numbers are append-only: never renumber, reuse or remove one.
+// - `oneof` members and enum values are append-only.
+// - Service methods are append-only; a method's request/response types are
+//   fixed once shipped (add fields to them instead).
+//
+// The DLL is a generic proto-RPC endpoint. Every RPC — ours (`ArcadeChallenges`)
+// and the vendor's (their `vendor.proto` services) — reaches the game as an
+// `RpcRequest` carrying the fully-qualified service + method names and the
+// encoded request message; the game answers with the method's response
+// message (no envelope) via `arcade_respond`, or `arcade_fail` with a message.
+syntax = "proto3";
+
+package arcade.sdk.v1;
+
+// ---------------------------------------------------------------------------
+// Registration: game -> DLL, once, in `arcade_init`.
+// ---------------------------------------------------------------------------
+
+// Everything the game declares about itself.
+message InitRequest {
+  // Stable identifier for this game, `[a-z0-9_-]+`. Becomes part of metric
+  // names, so it can never contain '.', ':' or '/'.
+  string game_id = 1;
+  // The vendor's own build/version string, recorded with every run.
+  string build_id = 2;
+  // `ARCADE_SDK_ABI_VERSION` the game was compiled against.
+  uint32 abi_version = 3;
+  // The challenges this build can run.
+  repeated Challenge challenges = 4;
+  // Metrics the game will push (`arcade_push_f32_metric`, `MetricSample`).
+  // Unknown names pushed later are accepted and treated as SCALAR.
+  repeated MetricDefinition metrics = 5;
+  // The vendor's compiled schema: a serialized `google.protobuf.FileDescriptorSet`
+  // produced by `protoc --include_imports --descriptor_set_out=...` over
+  // `vendor.proto`. Provides the request/response types of every vendor
+  // service and the event union.
+  bytes vendor_descriptor_set = 6;
+  // Fully-qualified names of the services the game serves, e.g.
+  // ["arcade.sdk.v1.ArcadeChallenges", "acme.roguelike.v1.Game"]. Must include
+  // `arcade.sdk.v1.ArcadeChallenges`; every other name must resolve in
+  // `vendor_descriptor_set`.
+  repeated string services = 7;
+  // Fully-qualified name of the vendor's event union message (the type of
+  // `Report.event`), e.g. "acme.roguelike.v1.GameEvent". Empty when the game
+  // reports no events.
+  string event_type = 8;
+  // The frame the game's positions and rotations are in: its up axis, its
+  // handedness and the order its Euler angles apply in. Required — every
+  // field set — because nothing the game hands us (a `Vec3`, a `Quat`, an
+  // `Euler` in its RPCs and events) can be read without it.
+  CoordinateSystem coordinate_system = 9;
+}
+
+// The game's world frame. `arcade_init` rejects an `InitRequest` without one
+// or with any field left UNSPECIFIED.
+//
+// Some engines' frames, for reference (check yours — mods and ports differ):
+//   Unity         up +Y, LEFT,  YAW_PITCH_ROLL
+//   Unreal        up +Z, LEFT,  YAW_PITCH_ROLL
+//   Godot         up +Y, RIGHT, YAW_PITCH_ROLL
+//   Source, idTech up +Z, RIGHT, YAW_PITCH_ROLL
+message CoordinateSystem {
+  // The world axis pointing up, against gravity.
+  Axis up = 1;
+  // Which hand the axes follow: with the thumb along +X and the index finger
+  // along +Y, the middle finger points along +Z. A rotation by a positive
+  // angle (a `Quat`) turns the way that hand's fingers curl around its thumb
+  // when the thumb points along the rotation axis.
+  Handedness handedness = 2;
+  // The order an `arcade.common.v1.Euler`'s angles are applied in.
+  EulerOrder euler_order = 3;
+}
+
+// A signed world axis.
+enum Axis {
+  AXIS_UNSPECIFIED = 0;
+  AXIS_POS_X = 1;
+  AXIS_NEG_X = 2;
+  AXIS_POS_Y = 3;
+  AXIS_NEG_Y = 4;
+  AXIS_POS_Z = 5;
+  AXIS_NEG_Z = 6;
+}
+
+enum Handedness {
+  HANDEDNESS_UNSPECIFIED = 0;
+  HANDEDNESS_LEFT = 1;
+  HANDEDNESS_RIGHT = 2;
+}
+
+// The order Euler angles are applied in, as intrinsic rotations: starting from
+// an unrotated object, each rotation is about the object's own axes as the
+// rotations before it left them. Yaw turns about the up axis, pitch about the
+// object's right axis, roll about its forward axis. YAW_PITCH_ROLL — turn,
+// then look up or down, then bank — is by far the most common. An order stated
+// extrinsically (every rotation about the fixed world axes) is the same list
+// reversed: Unity's "Z, then X, then Y, about the world axes" is YAW_PITCH_ROLL.
+enum EulerOrder {
+  EULER_ORDER_UNSPECIFIED = 0;
+  EULER_ORDER_YAW_PITCH_ROLL = 1;
+  EULER_ORDER_YAW_ROLL_PITCH = 2;
+  EULER_ORDER_PITCH_YAW_ROLL = 3;
+  EULER_ORDER_PITCH_ROLL_YAW = 4;
+  EULER_ORDER_ROLL_YAW_PITCH = 5;
+  EULER_ORDER_ROLL_PITCH_YAW = 6;
+}
+
+// One task the game can run.
+message Challenge {
+  // Stable identifier, unique within the game, e.g. "reach-the-beacon".
+  string id = 1;
+  // Human-readable name for UIs.
+  string display_name = 2;
+  // The instruction shown/given to the agent. A template: `{name}` is replaced
+  // by the chosen value of the variation named `name`. The game returns the
+  // resolved text in `StartChallengeResponse.instruction`.
+  string instruction = 3;
+  // Free-form notes for the people designing the benchmark.
+  string description = 4;
+  // Parameters that vary between runs of this challenge.
+  repeated VariationDef variations = 5;
+  // Names of the declared metrics that are meaningful for this challenge
+  // (UI grouping only).
+  repeated string metric_names = 6;
+  // How long an attempt may take before we consider it timed out. 0 = the
+  // controller's default.
+  uint32 default_timeout_s = 7;
+}
+
+// A parameter of a challenge and the values it may take.
+message VariationDef {
+  string name = 1;
+  string description = 2;
+  oneof kind {
+    EnumVariation enum = 10;
+    IntVariation int = 11;
+    FloatVariation float = 12;
+    BoolVariation bool = 13;
+  }
+}
+
+message EnumVariation {
+  repeated string values = 1;
+  // Used when a StartChallenge omits the variation. Must be one of `values`.
+  string default = 2;
+}
+
+message IntVariation {
+  int64 min = 1;
+  int64 max = 2;
+  int64 default = 3;
+  // Granularity hint for UIs. 0 = 1.
+  int64 step = 4;
+}
+
+message FloatVariation {
+  double min = 1;
+  double max = 2;
+  double default = 3;
+}
+
+message BoolVariation {
+  bool default = 1;
+}
+
+// One chosen value for a variation, by name.
+message VariationValue {
+  string name = 1;
+  oneof value {
+    string enum_value = 10;
+    int64 int_value = 11;
+    double float_value = 12;
+    bool bool_value = 13;
+  }
+}
+
+// A metric the game pushes.
+message MetricDefinition {
+  // `/`-separated path segments, no '.' or ':', e.g. "combat/shots_fired".
+  string name = 1;
+  MetricKind kind = 2;
+  // Free-form unit label for UIs ("m", "s", "count").
+  string unit = 3;
+  string description = 4;
+}
+
+enum MetricKind {
+  METRIC_KIND_UNSPECIFIED = 0;
+  // A sampled value; aggregated as a mean per episode.
+  METRIC_KIND_SCALAR = 1;
+  // A monotonically increasing count; the last value per episode is the total.
+  METRIC_KIND_COUNTER = 2;
+  // A true/false sample; aggregated as a true-rate per episode.
+  METRIC_KIND_BOOL = 3;
+}
+
+// ---------------------------------------------------------------------------
+// RPCs: DLL -> game, polled with `arcade_poll_request`.
+// ---------------------------------------------------------------------------
+
+// One RPC for the game to serve. Answer with `arcade_respond(request_id, <the
+// method's response message>)` or `arcade_fail(request_id, message)`.
+message RpcRequest {
+  // Assigned by the DLL; never 0.
+  uint64 request_id = 1;
+  // Fully-qualified service name, e.g. "arcade.sdk.v1.ArcadeChallenges".
+  string service = 2;
+  // Method name within the service, e.g. "StartChallenge".
+  string method = 3;
+  // The caller gives up waiting after this many milliseconds; a later answer
+  // is rejected with UNKNOWN_REQUEST. 0 = the SDK default.
+  uint32 timeout_ms = 4;
+  // The encoded request message of that method.
+  bytes request = 5;
+}
+
+// The service every game must serve.
+service ArcadeChallenges {
+  // Reset the world and start the named challenge with the given variation
+  // values (every declared variation is present; defaults were filled in).
+  // The player must be able to act within seconds of the response.
+  rpc StartChallenge(StartChallengeRequest) returns (StartChallengeResponse);
+  // Abort the running challenge, if any, and return to an idle state.
+  rpc StopChallenge(StopChallengeRequest) returns (StopChallengeResponse);
+  // Liveness probe served from the game loop.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message StartChallengeRequest {
+  string challenge_id = 1;
+  repeated VariationValue variations = 2;
+  // Opaque identifier of the evaluation run this attempt belongs to; echo it
+  // in ChallengeStarted/ChallengeCompleted.
+  string run_id = 3;
+  // Seed for anything random in the challenge; equal seeds should reproduce.
+  uint64 seed = 4;
+}
+
+message StartChallengeResponse {
+  // The instruction template with the variation values substituted — what the
+  // agent is told to do.
+  string instruction = 1;
+  // The game's clock at the start, seconds.
+  double game_time_s = 2;
+}
+
+message StopChallengeRequest {
+  string reason = 1;
+}
+
+message StopChallengeResponse {}
+
+message PingRequest {}
+
+message PingResponse {
+  double game_time_s = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Reports: game -> DLL, fire-and-forget, via `arcade_report`.
+// ---------------------------------------------------------------------------
+
+message Report {
+  // Stamped by the DLL: monotonically increasing per process. A gap seen by a
+  // subscriber means it was too slow and reports were dropped for it.
+  uint64 seq = 1;
+  // The game's clock, seconds. Fill this in; it orders samples within an
+  // attempt independent of wall-clock jitter.
+  double game_time_s = 2;
+  // Unix milliseconds. Stamped by the DLL when 0.
+  uint64 wall_time_unix_ms = 3;
+  oneof body {
+    ChallengeStarted challenge_started = 10;
+    ChallengeCompleted challenge_completed = 11;
+    MetricSample metric_sample = 12;
+    LogLine log_line = 13;
+    // An encoded message of the type named by `InitRequest.event_type`
+    // (the vendor's event union).
+    bytes event = 14;
+  }
+}
+
+message ChallengeStarted {
+  string challenge_id = 1;
+  string run_id = 2;
+}
+
+// Sent exactly once per attempt, as soon as the game has judged it.
+message ChallengeCompleted {
+  string challenge_id = 1;
+  string run_id = 2;
+  Outcome outcome = 3;
+  // Optional finer-grained score; meaning is the challenge's own.
+  double score = 4;
+  // Human-readable detail ("fell off the map", "3/5 targets").
+  string detail = 5;
+  // Final values of per-attempt metrics, logged once against the attempt.
+  repeated MetricSample final_metrics = 6;
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_SUCCESS = 1;
+  OUTCOME_FAILURE = 2;
+  OUTCOME_TIMEOUT = 3;
+  OUTCOME_ABORTED = 4;
+}
+
+// One metric value. `arcade_push_f32_metric` is the fast path producing these.
+message MetricSample {
+  string name = 1;
+  double value = 2;
+}
+
+message LogLine {
+  LogLevel level = 1;
+  string category = 2;
+  string message = 3;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARN = 3;
+  LOG_LEVEL_ERROR = 4;
+}

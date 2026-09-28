@@ -1,0 +1,124 @@
+// The Dark Mod's vendor schema for the arcade game SDK.
+//
+// Compiled into game/Arcade/vendor_pb.h (a serialized FileDescriptorSet) by
+// game/Arcade/gen_vendor_pb.py; rerun that script after editing this file.
+//
+// Coordinate conventions: Doom 3 / idTech4 world space. Z is up, right-handed,
+// one unit is one inch (0.0254 m). Angles are degrees; yaw 0 looks along +X,
+// positive yaw turns towards +Y; pitch is positive looking down.
+//
+// Append-only, forever: never renumber, reuse or delete a field, a oneof
+// member or a method once a build has shipped.
+syntax = "proto3";
+
+package thedarkmod.v1;
+
+import "arcade_common.proto";
+
+// RPCs the game serves. Called by fully-qualified name:
+// ("thedarkmod.v1.Game", "TeleportPlayer").
+service Game {
+  // Move the player to a world position and set the view direction.
+  // Fails when no map is loaded.
+  rpc TeleportPlayer(TeleportPlayerRequest) returns (TeleportPlayerResponse);
+  // Snapshot of the player's state. Fails when no map is loaded.
+  rpc GetPlayerState(GetPlayerStateRequest) returns (PlayerState);
+  // Every info_location area of the current mission map with its marker origin.
+  rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
+  // Every AI in the map with its position and alert state. Fails when no map is loaded.
+  rpc ListAi(ListAiRequest) returns (ListAiResponse);
+  // Queue a console command (developer tooling: "god", "noclip", "map ...").
+  // Executed on the next frame; the response carries no result.
+  rpc ExecConsoleCommand(ExecConsoleCommandRequest) returns (ExecConsoleCommandResponse);
+}
+
+message TeleportPlayerRequest {
+  arcade.common.v1.Vec3 position = 1;
+  float yaw_deg = 2;
+  float pitch_deg = 3;
+}
+message TeleportPlayerResponse {}
+
+message GetPlayerStateRequest {}
+
+message PlayerState {
+  arcade.common.v1.Vec3 position = 1;      // feet (physics origin)
+  arcade.common.v1.Euler view = 2;         // view angles
+  arcade.common.v1.Vec3 velocity = 3;      // units per second
+  int32 health = 4;                        // 100 = full
+  bool is_dead = 5;
+  int32 loot = 6;                          // total loot value carried
+  string location = 7;                     // info_location entity name, "" when outside any
+  float lightgem = 8;                      // 0 = fully dark .. 1 = fully lit
+  int32 max_ai_alert = 9;                  // highest alert index of any living AI, see AiAlertChanged
+  double game_time_s = 10;                 // gameLocal.time in seconds (0 when no map)
+  bool crouching = 11;
+}
+
+message ListLocationsRequest {}
+message Location {
+  string name = 1;
+  arcade.common.v1.Vec3 origin = 2;
+}
+message ListLocationsResponse {
+  repeated Location locations = 1;
+}
+
+message ListAiRequest {}
+message AiState {
+  string name = 1;
+  arcade.common.v1.Vec3 position = 2;
+  int32 health = 3;
+  bool is_dead = 4;
+  // 0 relaxed, 1 observant, 2 suspicious, 3 searching, 4 agitated searching, 5 combat
+  int32 alert_index = 5;
+  float distance_to_player = 6;            // world units
+}
+message ListAiResponse {
+  repeated AiState ai = 1;
+}
+
+message ExecConsoleCommandRequest {
+  string command = 1;
+}
+message ExecConsoleCommandResponse {}
+
+// The event union: what goes in Report.event. Registered as
+// InitRequest.event_type = "thedarkmod.v1.GameEvent".
+message GameEvent {
+  oneof event {
+    PlayerDied player_died = 1;
+    LootPickedUp loot_picked_up = 2;
+    AiAlertChanged ai_alert_changed = 3;
+    LocationChanged location_changed = 4;
+    PlayerDamaged player_damaged = 5;
+    MissionCompleted mission_completed = 6;
+    MapLoaded map_loaded = 7;
+  }
+}
+
+message PlayerDied {
+  arcade.common.v1.Vec3 position = 1;
+}
+message LootPickedUp {
+  int32 value = 1;                         // value of this pickup
+  int32 total = 2;                         // total loot carried after the pickup
+}
+message AiAlertChanged {
+  string ai_name = 1;
+  int32 alert_index = 2;
+  int32 previous_index = 3;
+  float distance_to_player = 4;
+}
+message LocationChanged {
+  string location = 1;
+  string previous = 2;
+}
+message PlayerDamaged {
+  int32 amount = 1;
+  int32 health = 2;
+}
+message MissionCompleted {}
+message MapLoaded {
+  string map = 1;
+}

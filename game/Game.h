@@ -152,6 +152,10 @@ public:
 
 	// grayman #3556 - determine whether the player is underwater
 	virtual bool				PlayerUnderwater() = 0;
+
+	// Arcade game SDK: poll the external-control endpoint once per engine frame.
+	// insideMapLoad is true when called from the loading-screen pump.
+	virtual void				ArcadeFrame( bool insideMapLoad ) = 0;
 };
 
 extern idGame *					game;

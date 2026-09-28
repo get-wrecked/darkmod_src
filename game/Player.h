@@ -1086,6 +1086,10 @@ public:
 	// Runs the "Click when ready" GUI, returns TRUE if the player is ready
 	bool			WaitUntilReady();
 
+	// Marks the player ready without input and removes the "Click when ready" GUI
+	// if it is already showing (used by the arcade SDK integration)
+	void			ForceReady();
+
 	// stgatilov #2454: enable/disable subtitles overlay and update active text to be displayed
 	void			UpdateSubtitlesGUI();
 

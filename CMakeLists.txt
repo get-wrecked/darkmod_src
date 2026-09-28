@@ -265,7 +265,15 @@ endif()
 include_directories(
 		"${PROJECT_SOURCE_DIR}"
 		"${PROJECT_SOURCE_DIR}/idlib"
+		"${PROJECT_SOURCE_DIR}/ThirdParty/arcade_sdk/include"	# header-only at build time; the library is dlopen-ed
 )
+
+# arcade game SDK shared library (optional at runtime, loaded from the executable directory)
+if (WIN32)
+	set(ARCADE_SDK_LIBRARY "${PROJECT_SOURCE_DIR}/ThirdParty/arcade_sdk/windows_64/arcade_sdk.dll")
+else()
+	set(ARCADE_SDK_LIBRARY "${PROJECT_SOURCE_DIR}/ThirdParty/arcade_sdk/linux_64/libarcade_sdk.so")
+endif()
 
 find_package(ZLIB REQUIRED CONFIG)
 find_package(minizip REQUIRED CONFIG)
@@ -334,6 +342,13 @@ if (COPY_EXE)
 		add_custom_command(
 				TARGET TheDarkMod POST_BUILD
 				COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:TheDarkMod>.debug "${GAME_DIR}"
+		)
+	endif()
+	if (EXISTS "${ARCADE_SDK_LIBRARY}")
+		# the game dlopen-s the arcade SDK from its own directory when arcade_enable is set
+		add_custom_command(
+				TARGET TheDarkMod POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy "${ARCADE_SDK_LIBRARY}" "${GAME_DIR}"
 		)
 	endif()
 endif ()

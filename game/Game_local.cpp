@@ -42,6 +42,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "../idlib/RevisionTracker.h"
 #include "Missions/MissionManager.h"
 #include "Missions/DownloadManager.h"
+#include "Arcade/ArcadeIntegration.h"
 #include "Http/HttpConnection.h"
 #include "Http/HttpRequest.h"
 #include "StimResponse/StimType.h" // grayman #2721
@@ -548,6 +549,9 @@ void idGameLocal::Init( void ) {
 	m_MissionManager = CMissionManagerPtr(new CMissionManager);
 	m_MissionManager->Init();
 
+	// Arcade game SDK (no-op unless +set arcade_enable 1); needs the mission manager for the starting map
+	arcadeIntegration.Init();
+
 	// Initialise the model generator
 	m_ModelGenerator = CModelGeneratorPtr(new CModelGenerator);
 	m_ModelGenerator->Init();
@@ -687,7 +691,10 @@ void idGameLocal::Shutdown( void ) {
 	
 	MapShutdown();
 
-	// greebo: De-allocate the missiondata singleton, this is not 
+	// stop the arcade SDK before its dependencies (mission manager) go away
+	arcadeIntegration.Shutdown();
+
+	// greebo: De-allocate the missiondata singleton, this is not
 	// done in MapShutdown() (needed for mission statistics)
 	m_MissionData.reset();
 	m_CampaignStats.reset();
@@ -1817,6 +1824,8 @@ void idGameLocal::LocalMapRestart( ) {
 	gamestate = GAMESTATE_ACTIVE;
 	m_MissionResult = MISSION_INPROGRESS;
 
+	arcadeIntegration.OnMapStarted();
+
 	Printf( "--------------------------------------\n" );
 }
 
@@ -1961,6 +1970,8 @@ void idGameLocal::InitFromNewMap( const char *mapName, idRenderWorld *renderWorl
 
 	gamestate = GAMESTATE_ACTIVE;
 	m_MissionResult = MISSION_INPROGRESS;
+
+	arcadeIntegration.OnMapStarted();
 
 	// Let the mission database know that we start playing
 	m_MissionManager->OnMissionStart();
@@ -2373,6 +2384,8 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 
 	gamestate = GAMESTATE_ACTIVE;
 
+	arcadeIntegration.OnMapStarted();
+
 	// Restore the physics pointer in the grabber.
 	gameLocal.m_Grabber->SetPhysicsFromDragEntity();
 
@@ -2448,6 +2461,8 @@ void idGameLocal::MapShutdown( void ) {
 		return;
 	}
 	Printf( "--------- Game Map Shutdown ----------\n" );
+
+	arcadeIntegration.OnMapShutdown();
 	gamestate = GAMESTATE_SHUTDOWN;
 
 	if ( gameRenderWorld ) {
@@ -8195,6 +8210,11 @@ void idGameLocal::OnVidRestart()
 }
 
 // grayman #3556 - Engine asks whether player is underwater
+
+void idGameLocal::ArcadeFrame( bool insideMapLoad )
+{
+	arcadeIntegration.Frame( insideMapLoad );
+}
 
 bool idGameLocal::PlayerUnderwater()
 {

@@ -1,0 +1,207 @@
+/* host.c — a complete minimal integration of the arcade game SDK in C.
+ *
+ * Stands in for a game: registers two challenges and a metric, then runs a
+ * 60 Hz "frame loop" that serves every RPC the SDK hands it and pushes a
+ * metric sample per frame. Protobuf encoding uses protobuf-c
+ * (https://github.com/protobuf-c/protobuf-c): generate the message code with
+ *
+ *     protoc -I<sdk>/proto --c_out=. arcade_sdk.proto arcade_common.proto
+ *
+ * and build with
+ *
+ *     cl host.c arcade_sdk.pb-c.c arcade_common.pb-c.c protobuf-c.c \
+ *        /I<sdk>/include /link arcade_sdk.lib
+ *
+ * or, on Linux,
+ *
+ *     cc host.c arcade_sdk.pb-c.c arcade_common.pb-c.c protobuf-c.c \
+ *        -I<sdk>/include -L<sdk> -larcade_sdk -Wl,-rpath,'$ORIGIN'
+ *
+ * With any other protobuf library the shape is identical: encode an
+ * InitRequest, poll RpcRequests, decode the request message named by
+ * (service, method), encode the matching response.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#ifdef _WIN32
+#include <windows.h>
+#define SLEEP_MS(ms) Sleep(ms)
+#else
+#include <unistd.h>
+#define SLEEP_MS(ms) usleep((ms) * 1000)
+#endif
+
+#include "arcade_sdk.h"
+#include "arcade_sdk.pb-c.h"
+
+#define CHALLENGES_SERVICE "arcade.sdk.v1.ArcadeChallenges"
+
+static double game_time_s(void) {
+    static double t = 0.0;
+    return t += 1.0 / 60.0;
+}
+
+static void check(const char *what, ArcadeStatus status) {
+    if (status != ARCADE_STATUS_OK) {
+        fprintf(stderr, "%s failed (%d): %s\n", what, (int)status, arcade_last_error());
+    }
+}
+
+/* Send one encoded Report. */
+static void report(Arcade__Sdk__V1__Report *r) {
+    size_t len = arcade__sdk__v1__report__get_packed_size(r);
+    uint8_t *buf = malloc(len);
+    arcade__sdk__v1__report__pack(r, buf);
+    check("arcade_report", arcade_report(buf, len));
+    free(buf);
+}
+
+static void respond_start(uint64_t request_id, const Arcade__Sdk__V1__StartChallengeRequest *req) {
+    /* The instruction template with the variation values substituted; a real
+     * game formats it from its own challenge table. */
+    char instruction[256];
+    snprintf(instruction, sizeof instruction, "Do challenge %s with %zu variations",
+             req->challenge_id, req->n_variations);
+    Arcade__Sdk__V1__StartChallengeResponse resp = ARCADE__SDK__V1__START_CHALLENGE_RESPONSE__INIT;
+    resp.instruction = instruction;
+    resp.game_time_s = game_time_s();
+    size_t len = arcade__sdk__v1__start_challenge_response__get_packed_size(&resp);
+    uint8_t *buf = malloc(len);
+    arcade__sdk__v1__start_challenge_response__pack(&resp, buf);
+    check("arcade_respond", arcade_respond(request_id, buf, len));
+    free(buf);
+
+    Arcade__Sdk__V1__ChallengeStarted started = ARCADE__SDK__V1__CHALLENGE_STARTED__INIT;
+    started.challenge_id = req->challenge_id;
+    started.run_id = req->run_id;
+    Arcade__Sdk__V1__Report r = ARCADE__SDK__V1__REPORT__INIT;
+    r.game_time_s = game_time_s();
+    r.body_case = ARCADE__SDK__V1__REPORT__BODY_CHALLENGE_STARTED;
+    r.challenge_started = &started;
+    report(&r);
+}
+
+static void respond_empty(uint64_t request_id, const ProtobufCMessage *msg) {
+    size_t len = protobuf_c_message_get_packed_size(msg);
+    uint8_t *buf = malloc(len ? len : 1);
+    protobuf_c_message_pack(msg, buf);
+    check("arcade_respond", arcade_respond(request_id, buf, len));
+    free(buf);
+}
+
+/* Serve one polled request. Vendor services would be dispatched here too. */
+static void serve(const Arcade__Sdk__V1__RpcRequest *req) {
+    if (strcmp(req->service, CHALLENGES_SERVICE) == 0) {
+        if (strcmp(req->method, "StartChallenge") == 0) {
+            Arcade__Sdk__V1__StartChallengeRequest *r =
+                arcade__sdk__v1__start_challenge_request__unpack(NULL, req->request.len, req->request.data);
+            if (!r) { arcade_fail(req->request_id, "bad StartChallengeRequest"); return; }
+            printf("start challenge %s\n", r->challenge_id);
+            respond_start(req->request_id, r);
+            arcade__sdk__v1__start_challenge_request__free_unpacked(r, NULL);
+            return;
+        }
+        if (strcmp(req->method, "StopChallenge") == 0) {
+            Arcade__Sdk__V1__StopChallengeResponse resp = ARCADE__SDK__V1__STOP_CHALLENGE_RESPONSE__INIT;
+            respond_empty(req->request_id, &resp.base);
+            return;
+        }
+        if (strcmp(req->method, "Ping") == 0) {
+            Arcade__Sdk__V1__PingResponse resp = ARCADE__SDK__V1__PING_RESPONSE__INIT;
+            resp.game_time_s = game_time_s();
+            respond_empty(req->request_id, &resp.base);
+            return;
+        }
+    }
+    arcade_fail(req->request_id, "unhandled method");
+}
+
+int main(void) {
+    if (arcade_abi_version() != ARCADE_SDK_ABI_VERSION) {
+        fprintf(stderr, "arcade_sdk.dll ABI %u, header %u\n", arcade_abi_version(), ARCADE_SDK_ABI_VERSION);
+        return 1;
+    }
+    printf("arcade_sdk %s\n", arcade_version());
+
+    /* ---- registration -------------------------------------------------- */
+    Arcade__Sdk__V1__EnumVariation color_enum = ARCADE__SDK__V1__ENUM_VARIATION__INIT;
+    char *colors[] = {"red", "blue", "green"};
+    color_enum.n_values = 3; color_enum.values = colors; color_enum.default_ = "red";
+    Arcade__Sdk__V1__VariationDef color = ARCADE__SDK__V1__VARIATION_DEF__INIT;
+    color.name = "color"; color.kind_case = ARCADE__SDK__V1__VARIATION_DEF__KIND_ENUM; color.enum_ = &color_enum;
+
+    Arcade__Sdk__V1__IntVariation seconds_int = ARCADE__SDK__V1__INT_VARIATION__INIT;
+    seconds_int.min = 10; seconds_int.max = 120; seconds_int.default_ = 60; seconds_int.step = 10;
+    Arcade__Sdk__V1__VariationDef seconds = ARCADE__SDK__V1__VARIATION_DEF__INIT;
+    seconds.name = "seconds"; seconds.kind_case = ARCADE__SDK__V1__VARIATION_DEF__KIND_INT; seconds.int_ = &seconds_int;
+
+    Arcade__Sdk__V1__VariationDef *beacon_vars[] = {&color, &seconds};
+    Arcade__Sdk__V1__Challenge beacon = ARCADE__SDK__V1__CHALLENGE__INIT;
+    beacon.id = "reach-the-beacon";
+    beacon.display_name = "Reach the beacon";
+    beacon.instruction = "Reach the {color} beacon within {seconds} seconds";
+    beacon.n_variations = 2; beacon.variations = beacon_vars;
+    beacon.default_timeout_s = 120;
+
+    Arcade__Sdk__V1__Challenge coins = ARCADE__SDK__V1__CHALLENGE__INIT;
+    coins.id = "collect-coins";
+    coins.display_name = "Collect coins";
+    coins.instruction = "Collect five coins";
+    coins.default_timeout_s = 60;
+
+    Arcade__Sdk__V1__Challenge *challenges[] = {&beacon, &coins};
+
+    Arcade__Sdk__V1__MetricDefinition distance = ARCADE__SDK__V1__METRIC_DEFINITION__INIT;
+    distance.name = "distance/travelled_m";
+    distance.kind = ARCADE__SDK__V1__METRIC_KIND__METRIC_KIND_SCALAR;
+    distance.unit = "m";
+    Arcade__Sdk__V1__MetricDefinition *metrics[] = {&distance};
+
+    char *services[] = {CHALLENGES_SERVICE};
+
+    Arcade__Sdk__V1__InitRequest init = ARCADE__SDK__V1__INIT_REQUEST__INIT;
+    init.game_id = "acme-host-c";
+    init.build_id = "example";
+    init.abi_version = ARCADE_SDK_ABI_VERSION;
+    init.n_challenges = 2; init.challenges = challenges;
+    init.n_metrics = 1; init.metrics = metrics;
+    init.n_services = 1; init.services = services;
+    /* No vendor.proto in this example: no vendor_descriptor_set, no event_type. */
+
+    size_t init_len = arcade__sdk__v1__init_request__get_packed_size(&init);
+    uint8_t *init_buf = malloc(init_len);
+    arcade__sdk__v1__init_request__pack(&init, init_buf);
+    ArcadeStatus status = arcade_init(init_buf, init_len);
+    free(init_buf);
+    if (status != ARCADE_STATUS_OK) {
+        fprintf(stderr, "arcade_init failed (%d): %s\n", (int)status, arcade_last_error());
+        return 1;
+    }
+    uint32_t distance_metric = arcade_metric_handle("distance/travelled_m");
+
+    /* ---- the frame loop ------------------------------------------------ */
+    uint8_t *buf = malloc(ARCADE_MAX_REQUEST_BYTES);
+    for (int frame = 0; frame < 60 * 30; frame++) {           /* 30 seconds */
+        size_t n = 0;
+        while (arcade_poll_request(buf, ARCADE_MAX_REQUEST_BYTES, &n) == ARCADE_STATUS_OK && n > 0) {
+            Arcade__Sdk__V1__RpcRequest *req = arcade__sdk__v1__rpc_request__unpack(NULL, n, buf);
+            if (!req) { fprintf(stderr, "undecodable RpcRequest\n"); continue; }
+            serve(req);
+            arcade__sdk__v1__rpc_request__free_unpacked(req, NULL);
+        }
+        check("arcade_push_f32_metric",
+              arcade_push_f32_metric(distance_metric, (float)frame * 0.1f, game_time_s()));
+        SLEEP_MS(16);
+    }
+    free(buf);
+
+    /* ---- shutdown ------------------------------------------------------ */
+    status = arcade_shutdown();
+    if (status == ARCADE_STATUS_SHUTDOWN_INCOMPLETE) {
+        fprintf(stderr, "SDK threads still running; not unloading: %s\n", arcade_last_error());
+    }
+    return status == ARCADE_STATUS_OK ? 0 : 1;
+}

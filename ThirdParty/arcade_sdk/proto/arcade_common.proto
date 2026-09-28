@@ -1,0 +1,128 @@
+// Common value types for game vendors integrating the arcade game SDK.
+//
+// Import from your own `vendor.proto` with `import "arcade_common.proto";` and
+// use e.g. `arcade.common.v1.Vec3` instead of defining your own vector type,
+// so our tooling (the debug app's forms, dashboards, controller helpers) can
+// recognise the value and render it sensibly.
+//
+// Conventions:
+// - Fields are `float` (game engines are f32); durations in seconds, angles in
+//   degrees unless a field name says otherwise.
+// - No handedness or up axis is imposed: every game declares its own in
+//   `arcade.sdk.v1.InitRequest.coordinate_system` (up axis, handedness, Euler
+//   order), and positions and rotations are read in that frame. Which way is
+//   forward, and the sign of each Euler angle, are yours to document in your
+//   vendor.proto.
+// - For durations and wall-clock times use `google.protobuf.Duration` and
+//   `google.protobuf.Timestamp`; they are not redefined here.
+// - Append-only: never renumber or remove a field.
+syntax = "proto3";
+
+package arcade.common.v1;
+
+// A 2D vector or point.
+message Vec2 {
+  float x = 1;
+  float y = 2;
+}
+
+// A 3D vector or point.
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+// A 4D vector.
+message Vec4 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float w = 4;
+}
+
+// An integer 2D vector (grid cell, pixel coordinate, ...).
+message IVec2 {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+// An integer 3D vector (voxel, chunk coordinate, ...).
+message IVec3 {
+  int32 x = 1;
+  int32 y = 2;
+  int32 z = 3;
+}
+
+// A unit quaternion (x, y, z, w) — w is the scalar part.
+message Quat {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float w = 4;
+}
+
+// Euler angles in degrees, applied in the order the game declares in
+// `InitRequest.coordinate_system.euler_order`: yaw about the up axis, pitch
+// about the object's right axis, roll about its forward axis.
+message Euler {
+  float pitch_deg = 1;
+  float yaw_deg = 2;
+  float roll_deg = 3;
+}
+
+// A rigid pose: position + rotation.
+message Pose {
+  Vec3 position = 1;
+  Quat rotation = 2;
+}
+
+// A full transform: position + rotation + (non-uniform) scale.
+message Transform {
+  Vec3 position = 1;
+  Quat rotation = 2;
+  Vec3 scale = 3;
+}
+
+// An axis-aligned bounding box.
+message Aabb {
+  Vec3 min = 1;
+  Vec3 max = 2;
+}
+
+// A sphere.
+message Sphere {
+  Vec3 center = 1;
+  float radius = 2;
+}
+
+// A ray: origin + (unit) direction.
+message Ray {
+  Vec3 origin = 1;
+  Vec3 direction = 2;
+}
+
+// A linear-space RGBA colour, each channel 0..1.
+message Color {
+  float r = 1;
+  float g = 2;
+  float b = 3;
+  float a = 4;
+}
+
+// A packed 8-bit-per-channel colour: 0xRRGGBBAA.
+message Color8 {
+  uint32 rgba = 1;
+}
+
+// A closed float interval.
+message Range {
+  float min = 1;
+  float max = 2;
+}
+
+// A closed integer interval.
+message IntRange {
+  int64 min = 1;
+  int64 max = 2;
+}
