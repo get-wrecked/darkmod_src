@@ -4,7 +4,8 @@ Build id:          thedarkmod@@BUILD_ID@
 Launch:            ./run_arcade.sh        (reads SCREEN_WIDTH / SCREEN_HEIGHT, default 2560x1440; plain X11 window, not exclusive fullscreen)
 Equivalent:        ./thedarkmod.x64 +set arcade_enable 1 +set arcade_buildId @BUILD_ID@ +set fs_currentfm arcade +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440 +set tdm_player_wait_until_ready 0
 Ready state:       main menu; StartChallenge loads the requested mission map itself (prologue9 or saintlucia, 4-6 s), sets the difficulty, no clicks needed.
-SDK:               libarcade_sdk.so @SDK_VERSION@ next to the executable; port 6006 (ARCADE_SDK_PORT); log arcade_sdk.log next to the executable.
+SDK:               libarcade_sdk.so @SDK_VERSION@ (ABI 2) next to the executable; port 6006 (ARCADE_SDK_PORT); log arcade_sdk.log next to the executable.
+Frames/input:      640x360 RGBA frames submitted every rendered frame (real-time pacing, ~tick_hz 60); agent input taken from the SDK each frame and injected as keyboard/mouse. One instance per process.
 Schema:            vendor.proto (service thedarkmod.v1.Game, event union thedarkmod.v1.GameEvent).
 Challenges:        complete-mission, newjob-objective, stlucia-objective, newjob-reach, stlucia-reach, steal-loot, knockout, explore -- see ARCADE_README.md.
 Missions:          fms/arcade holds "A New Job" (map prologue9) and "Tears of St. Lucia" (map saintlucia) as one fan mission folder.

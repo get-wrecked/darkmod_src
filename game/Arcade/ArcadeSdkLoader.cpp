@@ -21,18 +21,21 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 	#define ARCADE_SDK_LIBNAME "libarcade_sdk.so"
 #endif
 
-ArcadeSdkLoader::ArcadeSdkLoader() :
-	abi_version( nullptr ), version( nullptr ), last_error( nullptr ), init( nullptr ),
-	shutdown( nullptr ), poll_request( nullptr ), respond( nullptr ), fail( nullptr ),
-	report( nullptr ), metric_handle( nullptr ), push_f32_metric( nullptr ), log( nullptr ),
-	handle( 0 )
-{}
+ArcadeSdkLoader::ArcadeSdkLoader() : handle( 0 ) {
+	ClearSymbols();
+}
+
+void ArcadeSdkLoader::ClearSymbols() {
+	abi_version = nullptr; version = nullptr; last_error = nullptr; init = nullptr; shutdown = nullptr;
+	instance_count = nullptr; poll_request = nullptr; respond = nullptr; fail = nullptr; report = nullptr;
+	metric_handle = nullptr; push_f32_metric = nullptr; submit_frame = nullptr; poll_input = nullptr; log = nullptr;
+}
 
 template<class F>
 static bool BindSymbol( uintptr_t handle, const char *name, F &fn, idStr &error ) {
 	void *ptr = Sys_DLL_GetProcAddress( handle, name );
 	if ( !ptr ) {
-		error = va( "symbol '%s' not found in " ARCADE_SDK_LIBNAME, name );
+		error = va( "symbol '%s' not found in " ARCADE_SDK_LIBNAME " (older SDK release?)", name );
 		fn = nullptr;
 		return false;
 	}
@@ -46,7 +49,7 @@ bool ArcadeSdkLoader::Load() {
 	}
 
 	// The library lives next to the executable (that is also where the SDK writes
-	// arcade_sdk.log and looks for the debug app).
+	// arcade_sdk.log and looks for the arcade-sdk tool to launch the debug app).
 	path = Sys_EXEPath();
 	path.StripFilename();
 	path.AppendPath( ARCADE_SDK_LIBNAME );
@@ -63,12 +66,15 @@ bool ArcadeSdkLoader::Load() {
 	ok &= BindSymbol( handle, "arcade_last_error", last_error, error );
 	ok &= BindSymbol( handle, "arcade_init", init, error );
 	ok &= BindSymbol( handle, "arcade_shutdown", shutdown, error );
+	ok &= BindSymbol( handle, "arcade_instance_count", instance_count, error );
 	ok &= BindSymbol( handle, "arcade_poll_request", poll_request, error );
 	ok &= BindSymbol( handle, "arcade_respond", respond, error );
 	ok &= BindSymbol( handle, "arcade_fail", fail, error );
 	ok &= BindSymbol( handle, "arcade_report", report, error );
 	ok &= BindSymbol( handle, "arcade_metric_handle", metric_handle, error );
 	ok &= BindSymbol( handle, "arcade_push_f32_metric", push_f32_metric, error );
+	ok &= BindSymbol( handle, "arcade_submit_frame", submit_frame, error );
+	ok &= BindSymbol( handle, "arcade_poll_input", poll_input, error );
 	ok &= BindSymbol( handle, "arcade_log", log, error );
 	if ( !ok ) {
 		Unload();
@@ -89,7 +95,5 @@ void ArcadeSdkLoader::Unload() {
 		Sys_DLL_Unload( handle );
 		handle = 0;
 	}
-	abi_version = nullptr; version = nullptr; last_error = nullptr; init = nullptr;
-	shutdown = nullptr; poll_request = nullptr; respond = nullptr; fail = nullptr;
-	report = nullptr; metric_handle = nullptr; push_f32_metric = nullptr; log = nullptr;
+	ClearSymbols();
 }

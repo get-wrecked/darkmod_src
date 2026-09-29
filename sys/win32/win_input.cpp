@@ -1082,3 +1082,14 @@ void Sys_EndMouseInputEvents( void ) { }
 unsigned char Sys_MapCharForKey( int key ) {
 	return (unsigned char)key;
 }
+
+/*
+=============================================================================
+Synthetic input (arcade SDK): not implemented on Windows yet, the arcade build
+is Linux-only. See sys/linux/input.cpp for the Linux version.
+=============================================================================
+*/
+void Sys_InjectKeyEvent( int key, bool down ) {}
+void Sys_InjectMouseDelta( int dx, int dy ) {}
+void Sys_InjectMouseButton( int button, bool down ) {}
+void Sys_InjectMouseWheel( int notches ) {}

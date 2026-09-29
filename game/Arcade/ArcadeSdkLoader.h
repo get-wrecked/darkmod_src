@@ -18,7 +18,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "arcade_sdk.h"
 
 /**
- * Runtime binding to the arcade SDK shared library.
+ * Runtime binding to the arcade SDK shared library (ABI 2).
  *
  * The SDK is loaded with dlopen/LoadLibrary from the executable's directory so
  * that a normal player build keeps working when the library is absent: the
@@ -42,15 +42,20 @@ public:
 	const char *( *last_error )( void );
 	ArcadeStatus ( *init )( const uint8_t *, size_t );
 	ArcadeStatus ( *shutdown )( void );
+	uint32_t ( *instance_count )( void );
 	ArcadeStatus ( *poll_request )( uint8_t *, size_t, size_t * );
 	ArcadeStatus ( *respond )( uint64_t, const uint8_t *, size_t );
 	ArcadeStatus ( *fail )( uint64_t, const char * );
-	ArcadeStatus ( *report )( const uint8_t *, size_t );
+	ArcadeStatus ( *report )( uint32_t, const uint8_t *, size_t );
 	uint32_t ( *metric_handle )( const char * );
-	ArcadeStatus ( *push_f32_metric )( uint32_t, float, double );
+	ArcadeStatus ( *push_f32_metric )( uint32_t, uint32_t, float, double );
+	ArcadeStatus ( *submit_frame )( uint32_t, const ArcadeFrame * );
+	ArcadeStatus ( *poll_input )( uint32_t, uint64_t, uint32_t, uint8_t *, size_t, size_t * );
 	ArcadeStatus ( *log )( int32_t, const char *, const char * );
 
 private:
+	void ClearSymbols();
+
 	uintptr_t handle;
 	idStr error;
 	idStr path;

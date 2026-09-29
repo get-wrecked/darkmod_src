@@ -18,7 +18,9 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "ArcadeSdkLoader.h"
 #include "ArcadeProto.h"
 
+#include <atomic>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -194,6 +196,13 @@ private:
 	int PlayerLoot( idPlayer *player ) const;
 	const char *PlayerLocationName( idPlayer *player ) const;
 
+	// --- frames out, input in (SDK ABI 2)
+	static void FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, void *user );
+	void OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride );	// backend thread
+	void PollInput();
+	void ApplyInputEvent( ArcadeProto::Reader inputEvent );
+	static int KeyCodeToTdmKey( int keyCode );
+
 	// --- reports
 	double GameTimeS() const;
 	void ReportChallengeStarted();
@@ -240,7 +249,18 @@ private:
 	uint32_t mStealthScore, mLootFraction, mKnockouts, mKills, mObjectivesComplete, mLocationsVisited;
 
 	std::vector<uint8_t> pollBuf;
+	std::vector<uint8_t> inputBuf;
 	std::vector<std::vector<uint8_t>> deferredRequests;
+
+	// frames: submitted from the render backend thread, counted for poll_input
+	std::mutex captureMutex;			// held while a frame is being submitted; taken by Shutdown
+	std::atomic<uint64_t> framesSubmitted;
+	std::atomic<bool> capturing;
+	double mouseCarryX, mouseCarryY;	// fractional mouse motion not yet injected
+	int inputWarnings;
+	std::string dumpFramePath;			// arcade_dumpframe: write the next captured frame here (PPM, upright)
+public:
+	void RequestFrameDump( const char *path );
 };
 
 extern CArcadeIntegration arcadeIntegration;

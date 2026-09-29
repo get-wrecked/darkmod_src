@@ -1,8 +1,10 @@
 /* host.c — a complete minimal integration of the arcade game SDK in C.
  *
- * Stands in for a game: registers two challenges and a metric, then runs a
- * 60 Hz "frame loop" that serves every RPC the SDK hands it and pushes a
- * metric sample per frame. Protobuf encoding uses protobuf-c
+ * Stands in for a game with one instance, running in real time: registers
+ * two challenges and a metric, then runs a 60 Hz "frame loop" that serves
+ * every RPC the SDK hands it, submits the frame the agent sees (a square on a
+ * field), takes the agent's input (WASD / arrows / the mouse move the
+ * square) and pushes a metric sample per frame. Protobuf encoding uses protobuf-c
  * (https://github.com/protobuf-c/protobuf-c): generate the message code with
  *
  *     protoc -I<sdk>/proto --c_out=. arcade_sdk.proto arcade_common.proto
@@ -50,16 +52,60 @@ static void check(const char *what, ArcadeStatus status) {
     }
 }
 
-/* Send one encoded Report. */
-static void report(Arcade__Sdk__V1__Report *r) {
+#define WIDTH 640
+#define HEIGHT 360
+
+/* The one world: where the player's square is. */
+static float player_x = WIDTH / 2, player_y = HEIGHT / 2;
+static uint8_t pixels[WIDTH * HEIGHT * 4];
+
+/* Send one encoded Report about `instance`. */
+static void report(uint32_t instance, Arcade__Sdk__V1__Report *r) {
     size_t len = arcade__sdk__v1__report__get_packed_size(r);
     uint8_t *buf = malloc(len);
     arcade__sdk__v1__report__pack(r, buf);
-    check("arcade_report", arcade_report(buf, len));
+    check("arcade_report", arcade_report(instance, buf, len));
     free(buf);
 }
 
-static void respond_start(uint64_t request_id, const Arcade__Sdk__V1__StartChallengeRequest *req) {
+static bool held(const Arcade__Sdk__V1__Input *in, Arcade__Sdk__V1__KeyCode a, Arcade__Sdk__V1__KeyCode b) {
+    for (size_t i = 0; i < in->n_keys_down; i++) {
+        if (in->keys_down[i] == a || in->keys_down[i] == b) return true;
+    }
+    return false;
+}
+
+/* Move the square by what the agent holds and how it moved the mouse. */
+static void apply_input(const Arcade__Sdk__V1__Input *in) {
+    const float speed = 4.0f;
+    if (held(in, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_KEY_W, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_ARROW_UP)) player_y -= speed;
+    if (held(in, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_KEY_S, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_ARROW_DOWN)) player_y += speed;
+    if (held(in, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_KEY_A, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_ARROW_LEFT)) player_x -= speed;
+    if (held(in, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_KEY_D, ARCADE__SDK__V1__KEY_CODE__KEY_CODE_ARROW_RIGHT)) player_x += speed;
+    player_x += (float)in->mouse_dx * 0.5f;
+    player_y += (float)in->mouse_dy * 0.5f;
+    if (player_x < 0) player_x = 0;
+    if (player_x > WIDTH - 1) player_x = WIDTH - 1;
+    if (player_y < 0) player_y = 0;
+    if (player_y > HEIGHT - 1) player_y = HEIGHT - 1;
+}
+
+/* What the agent sees: a green field with a white square at the player. */
+static void render(void) {
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            uint8_t *p = &pixels[(y * WIDTH + x) * 4];
+            bool square = abs(x - (int)player_x) < 12 && abs(y - (int)player_y) < 12;
+            p[0] = square ? 255 : 40;
+            p[1] = square ? 255 : 140;
+            p[2] = square ? 255 : 40;
+            p[3] = 255;
+        }
+    }
+}
+
+static void respond_start(uint64_t request_id, uint32_t instance,
+                          const Arcade__Sdk__V1__StartChallengeRequest *req) {
     /* The instruction template with the variation values substituted; a real
      * game formats it from its own challenge table. */
     char instruction[256];
@@ -81,7 +127,7 @@ static void respond_start(uint64_t request_id, const Arcade__Sdk__V1__StartChall
     r.game_time_s = game_time_s();
     r.body_case = ARCADE__SDK__V1__REPORT__BODY_CHALLENGE_STARTED;
     r.challenge_started = &started;
-    report(&r);
+    report(instance, &r);
 }
 
 static void respond_empty(uint64_t request_id, const ProtobufCMessage *msg) {
@@ -92,7 +138,8 @@ static void respond_empty(uint64_t request_id, const ProtobufCMessage *msg) {
     free(buf);
 }
 
-/* Serve one polled request. Vendor services would be dispatched here too. */
+/* Serve one polled request (for `req->instance`; this game hosts only 0).
+ * Vendor services would be dispatched here too. */
 static void serve(const Arcade__Sdk__V1__RpcRequest *req) {
     if (strcmp(req->service, CHALLENGES_SERVICE) == 0) {
         if (strcmp(req->method, "StartChallenge") == 0) {
@@ -100,7 +147,7 @@ static void serve(const Arcade__Sdk__V1__RpcRequest *req) {
                 arcade__sdk__v1__start_challenge_request__unpack(NULL, req->request.len, req->request.data);
             if (!r) { arcade_fail(req->request_id, "bad StartChallengeRequest"); return; }
             printf("start challenge %s\n", r->challenge_id);
-            respond_start(req->request_id, r);
+            respond_start(req->request_id, req->instance, r);
             arcade__sdk__v1__start_challenge_request__free_unpacked(r, NULL);
             return;
         }
@@ -162,6 +209,12 @@ int main(void) {
 
     char *services[] = {CHALLENGES_SERVICE};
 
+    /* The world frame: required. This stand-in pretends to be a Unity game. */
+    Arcade__Sdk__V1__CoordinateSystem frame = ARCADE__SDK__V1__COORDINATE_SYSTEM__INIT;
+    frame.up = ARCADE__SDK__V1__AXIS__AXIS_POS_Y;
+    frame.handedness = ARCADE__SDK__V1__HANDEDNESS__HANDEDNESS_LEFT;
+    frame.euler_order = ARCADE__SDK__V1__EULER_ORDER__EULER_ORDER_YAW_PITCH_ROLL;
+
     Arcade__Sdk__V1__InitRequest init = ARCADE__SDK__V1__INIT_REQUEST__INIT;
     init.game_id = "acme-host-c";
     init.build_id = "example";
@@ -169,6 +222,15 @@ int main(void) {
     init.n_challenges = 2; init.challenges = challenges;
     init.n_metrics = 1; init.metrics = metrics;
     init.n_services = 1; init.services = services;
+    init.coordinate_system = &frame;
+    /* Runs on the wall clock; submits 640x360 frames; one instance. */
+    Arcade__Sdk__V1__VideoSize video = ARCADE__SDK__V1__VIDEO_SIZE__INIT;
+    video.width = WIDTH;
+    video.height = HEIGHT;
+    init.pacing = ARCADE__SDK__V1__PACING__PACING_REAL_TIME;
+    init.video = &video;
+    init.tick_hz = 60;
+    init.max_instances = 1;
     /* No vendor.proto in this example: no vendor_descriptor_set, no event_type. */
 
     size_t init_len = arcade__sdk__v1__init_request__get_packed_size(&init);
@@ -184,7 +246,8 @@ int main(void) {
 
     /* ---- the frame loop ------------------------------------------------ */
     uint8_t *buf = malloc(ARCADE_MAX_REQUEST_BYTES);
-    for (int frame = 0; frame < 60 * 30; frame++) {           /* 30 seconds */
+    uint8_t *input_buf = malloc(ARCADE_MAX_INPUT_BYTES);
+    for (uint64_t frame = 0; frame < 60 * 30; frame++) {      /* 30 seconds */
         size_t n = 0;
         while (arcade_poll_request(buf, ARCADE_MAX_REQUEST_BYTES, &n) == ARCADE_STATUS_OK && n > 0) {
             Arcade__Sdk__V1__RpcRequest *req = arcade__sdk__v1__rpc_request__unpack(NULL, n, buf);
@@ -192,10 +255,37 @@ int main(void) {
             serve(req);
             arcade__sdk__v1__rpc_request__free_unpacked(req, NULL);
         }
+
+        /* What the agent sees at this step... */
+        render();
+        ArcadeFrame f = {0};
+        f.frame_index = frame;
+        f.game_time_s = game_time_s();
+        f.pixels = pixels;
+        f.width = WIDTH;
+        f.height = HEIGHT;
+        f.format = ARCADE_PIXEL_FORMAT_RGBA8;
+        check("arcade_submit_frame", arcade_submit_frame(0, &f));
+
+        /* ...and what it did about it, applied before the next step. Real
+         * time: returns at once with everything since the last poll. */
+        size_t in_len = 0;
+        ArcadeStatus polled = arcade_poll_input(0, frame, 0, input_buf, ARCADE_MAX_INPUT_BYTES, &in_len);
+        if (polled == ARCADE_STATUS_OK) {
+            Arcade__Sdk__V1__Input *in = arcade__sdk__v1__input__unpack(NULL, in_len, input_buf);
+            if (in) {
+                apply_input(in);
+                arcade__sdk__v1__input__free_unpacked(in, NULL);
+            }
+        } else {
+            check("arcade_poll_input", polled);
+        }
+
         check("arcade_push_f32_metric",
-              arcade_push_f32_metric(distance_metric, (float)frame * 0.1f, game_time_s()));
+              arcade_push_f32_metric(0, distance_metric, player_x / WIDTH * 10.0f, game_time_s()));
         SLEEP_MS(16);
     }
+    free(input_buf);
     free(buf);
 
     /* ---- shutdown ------------------------------------------------------ */

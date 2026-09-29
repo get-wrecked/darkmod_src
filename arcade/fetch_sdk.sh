@@ -1,7 +1,7 @@
 #!/bin/sh
 # Downloads the pinned arcade SDK release and unpacks what we need:
 #   ThirdParty/arcade_sdk/linux_64/libarcade_sdk.so   (shipped next to the executable; not committed)
-#   arcade/tools/arcade-sdk, arcade-sdk-debug          (the submission CLI and the debug app; not committed)
+#   arcade/tools/arcade-sdk                            (the CLI: submit, describe, and `arcade-sdk debug` for the debug app; not committed)
 # The header, protos and guide in ThirdParty/arcade_sdk ARE committed; when bumping
 # SDK_ZIP, diff those against the archive and update them (and the engine, if the
 # InitRequest contract changed) in the same commit.
@@ -9,7 +9,7 @@
 # Needs gsutil authenticated to an account that may read the bucket.
 set -eu
 
-SDK_ZIP=${SDK_ZIP:-"gs://gi-prod-games-cluster-app/arcade_sdk-linux-fa788829d12ff6034665da29e1f2bff052068806.zip"}
+SDK_ZIP=${SDK_ZIP:-"gs://gi-prod-games-cluster-app/arcade_sdk-linux-074b9f239370f35d372f9157139d74f9b98ca457.zip"}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
@@ -22,8 +22,8 @@ unzip -q "$TMP/sdk.zip" -d "$TMP/sdk"
 
 mkdir -p "$REPO/ThirdParty/arcade_sdk/linux_64" "$HERE/tools"
 cp "$TMP/sdk/libarcade_sdk.so" "$REPO/ThirdParty/arcade_sdk/linux_64/libarcade_sdk.so"
-cp "$TMP/sdk/arcade-sdk" "$TMP/sdk/arcade-sdk-debug" "$HERE/tools/"
-chmod +x "$HERE/tools/arcade-sdk" "$HERE/tools/arcade-sdk-debug"
+cp "$TMP/sdk/arcade-sdk" "$HERE/tools/"
+chmod +x "$HERE/tools/arcade-sdk"
 
 for f in include/arcade_sdk.h proto/arcade_sdk.proto proto/arcade_common.proto; do
 	if ! cmp -s "$TMP/sdk/$f" "$REPO/ThirdParty/arcade_sdk/$f"; then

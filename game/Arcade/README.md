@@ -15,7 +15,7 @@ loaded at runtime only when asked for.
 | File | Purpose |
 |---|---|
 | `ArcadeIntegration.{h,cpp}` | The integration: SDK lifecycle, request dispatch, challenge state machine, judging, event/metric observers. |
-| `ArcadeSdkLoader.{h,cpp}` | `dlopen`/`LoadLibrary` binding of `libarcade_sdk.so` / `arcade_sdk.dll` from the executable directory, ABI check. |
+| `ArcadeSdkLoader.{h,cpp}` | `dlopen`/`LoadLibrary` binding of `libarcade_sdk.so` / `arcade_sdk.dll` from the executable directory, ABI check (ABI 2). |
 | `ArcadeProto.{h,cpp}` | Minimal proto3 wire-format writer/reader (the engine has no protobuf dependency). Includes doctest cases. |
 | `vendor.proto` | Our schema: the `thedarkmod.v1.Game` RPC service and the `GameEvent` union. Append-only. |
 | `vendor_pb.h` | Generated: serialized `FileDescriptorSet` of `vendor.proto` embedded in the binary. |
@@ -24,6 +24,32 @@ loaded at runtime only when asked for.
 Engine hooks: `idGame::ArcadeFrame()` is called from `idCommonLocal::Frame()`
 (and from `GUIFrame()` during map loads, poll-only); `idGameLocal` calls
 `Init/Shutdown/OnMapStarted/OnMapShutdown` at the matching points.
+
+## Frames and input (SDK ABI 2)
+
+The agent does not see the screen or drive the OS: the game hands the SDK a
+frame every step and takes the agent's input back from it.
+
+- **Frames**: `renderer/backend/FrameCapture.cpp` registers a hook that runs in
+  the render backend right before the buffers are swapped. It blits the default
+  framebuffer into a private 640x360 FBO, reads it back as RGBA8 (rows bottom-up,
+  flagged `ARCADE_FRAME_FLIP_Y`) and calls `CArcadeIntegration::OnFrameCaptured`,
+  which submits it with `arcade_submit_frame(0, ...)`. This runs on the backend
+  thread; `Shutdown()` unhooks and takes the capture mutex before the SDK goes
+  away. Pacing is `REAL_TIME` (the engine runs on the wall clock), `tick_hz` 60,
+  one instance per process (`max_instances` 1; RPCs for other instances fail).
+- **Input**: every normal frame `PollInput()` calls `arcade_poll_input(0, ...)`
+  and replays the ordered events through `Sys_InjectKeyEvent`,
+  `Sys_InjectMouseDelta`, `Sys_InjectMouseButton` and `Sys_InjectMouseWheel`
+  (`sys/linux/input.cpp`), which feed the same event queue and usercmd poll
+  buffers as the GLFW callbacks, so binds, GUIs and player movement all see the
+  agent exactly as they would a person at the keyboard. `KeyCodeToTdmKey` maps
+  the SDK's W3C key positions to TDM keynums; mouse motion is raw counts, +y
+  down, with sub-count remainders carried between frames.
+
+The `Play` tab of `arcade-sdk debug` shows what the agent sees and lets you play
+through the SDK with your own keyboard and mouse: if that works, the agent's
+input path works.
 
 ## Running
 

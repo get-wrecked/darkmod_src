@@ -603,6 +603,10 @@ void RB_SwapBuffers() {
 		qglFinish();
 	}
 
+	// hand a copy of the finished frame to an external consumer (arcade SDK), if one is registered
+	extern void RB_CaptureFrameForHook();
+	RB_CaptureFrameForHook();
+
 	// don't flip if drawing to front buffer
 	GLimp_SwapBuffers();
 }

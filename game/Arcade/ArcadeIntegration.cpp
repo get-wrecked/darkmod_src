@@ -28,6 +28,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "../Objectives/ObjectiveComponent.h"
 #include "../DifficultyManager.h"
 #include "../../framework/Licensee.h"
+#include "../../framework/KeyInput.h"
+#include "../../renderer/RenderSystem.h"
 #include "../../idlib/RevisionTracker.h"
 
 #include <stdarg.h>
@@ -69,6 +71,15 @@ enum { LOG_DEBUG = 1, LOG_INFO = 2, LOG_WARN = 3, LOG_ERROR = 4 };
 
 static const float UNITS_TO_METERS = 0.0254f;	// idTech4: 1 unit = 1 inch
 static const float LIGHTGEM_MAX = 32.0f;		// DARKMOD_LG_MAX
+
+// What the agent sees: every presented frame downscaled to this size (InitRequest.video)
+static const int ARCADE_VIDEO_WIDTH = 640;
+static const int ARCADE_VIDEO_HEIGHT = 360;
+static const int ARCADE_TICK_HZ = 60;
+// Pacing enum (arcade_sdk.proto)
+enum { PACING_REAL_TIME = 1, PACING_LOCKSTEP = 2 };
+// Input.events oneof / InputEvent members (arcade_sdk.proto)
+enum { INEV_KEY = 1, INEV_BUTTON = 2, INEV_MOUSE_MOVE = 3, INEV_WHEEL = 4 };
 
 // ---------------------------------------------------------------------------
 // The missions of the arcade build and what an agent can be asked to do in them.
@@ -173,6 +184,13 @@ static void Arcade_Probe_f( const idCmdArgs &args ) {
 	}
 }
 
+// "arcade_dumpframe <file.ppm>": writes the next frame handed to the SDK, as the agent
+// would see it (upright, RGB), to check orientation and colour order.
+static void Arcade_DumpFrame_f( const idCmdArgs &args ) {
+	if ( args.Argc() < 2 ) { common->Printf( "usage: arcade_dumpframe <file.ppm>\n" ); return; }
+	arcadeIntegration.RequestFrameDump( args.Argv( 1 ) );
+}
+
 // ---------------------------------------------------------------------------
 
 std::string CArcadeIntegration::VarValue::ToString() const {
@@ -189,7 +207,8 @@ CArcadeIntegration::CArcadeIntegration() :
 	active( false ), inFrame( false ), state( STATE_IDLE ), mapGeneration( 0 ), observedGeneration( -1 ), missionsAvailable( 0 ),
 	lastLoot( 0 ), lastHealth( 0 ), wasDead( false ), lastMissionResult( 0 ), lastKnockouts( 0 ), lastKills( 0 ), lastMetricsPushMs( 0 ),
 	mHealth( 0 ), mLoot( 0 ), mLightgem( 0 ), mMaxAlert( 0 ), mDistance( 0 ),
-	mStealthScore( 0 ), mLootFraction( 0 ), mKnockouts( 0 ), mKills( 0 ), mObjectivesComplete( 0 ), mLocationsVisited( 0 )
+	mStealthScore( 0 ), mLootFraction( 0 ), mKnockouts( 0 ), mKills( 0 ), mObjectivesComplete( 0 ), mLocationsVisited( 0 ),
+	framesSubmitted( 0 ), capturing( false ), mouseCarryX( 0.0 ), mouseCarryY( 0.0 ), inputWarnings( 0 )
 {}
 
 // ===========================================================================
@@ -206,6 +225,7 @@ void CArcadeIntegration::Init() {
 
 	common->Printf( "--------- Arcade SDK ----------\n" );
 	cmdSystem->AddCommand( "arcade_probe", Arcade_Probe_f, CMD_FL_GAME, "arcade SDK diagnostic: player objective flag and what an objective volume's clip query sees" );
+	cmdSystem->AddCommand( "arcade_dumpframe", Arcade_DumpFrame_f, CMD_FL_GAME, "arcade SDK diagnostic: write the next frame submitted to the SDK as a PPM file" );
 	if ( !sdk.Load() ) {
 		common->Warning( "Arcade SDK disabled: %s", sdk.GetError() );
 		return;
@@ -230,7 +250,20 @@ void CArcadeIntegration::Init() {
 	active = true;
 	ResolveMetricHandles();
 	pollBuf.resize( ARCADE_MAX_REQUEST_BYTES );
-	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available)", missionsAvailable, NUM_MISSIONS );
+	inputBuf.resize( ARCADE_MAX_INPUT_BYTES );
+
+	uint32_t instances = sdk.instance_count();
+	if ( instances != 1 ) {
+		common->Warning( "Arcade SDK: %u instances requested but this build hosts one world per process; only instance 0 is served", instances );
+	}
+
+	// frames: every presented frame, downscaled, goes to the SDK from the render backend
+	framesSubmitted = 0;
+	capturing = true;
+	R_SetFrameCaptureHook( ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT, FrameCaptureThunk, this );
+
+	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available, %dx%d frames, real-time pacing)",
+		missionsAvailable, NUM_MISSIONS, ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT );
 	common->Printf( "-------------------------------\n" );
 }
 
@@ -244,6 +277,11 @@ void CArcadeIntegration::Shutdown() {
 		Fail( attempt.pendingRequestId, "game shutting down" );
 		state = STATE_IDLE;
 	}
+
+	// stop the backend from submitting frames, and wait for one in flight to finish
+	R_SetFrameCaptureHook( 0, 0, nullptr, nullptr );
+	capturing = false;
+	std::lock_guard<std::mutex> captureLock( captureMutex );
 
 	ArcadeStatus status = sdk.shutdown();
 	active = false;
@@ -510,6 +548,18 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 	init.String( 7, VENDOR_SERVICE );
 	init.String( 8, VENDOR_EVENT_TYPE );
 
+	// ABI 2: pacing, frame size, tick rate, instances. The engine runs on the wall
+	// clock and one process hosts one world.
+	init.Enum( 10, PACING_REAL_TIME );
+	{
+		Writer video;	// VideoSize { 1 width, 2 height }
+		video.UInt32( 1, ARCADE_VIDEO_WIDTH );
+		video.UInt32( 2, ARCADE_VIDEO_HEIGHT );
+		init.PutMessageAlways( 11, video );
+	}
+	init.UInt32( 12, ARCADE_TICK_HZ );
+	init.UInt32( 13, 1 );
+
 	// CoordinateSystem { 1 up, 2 handedness, 3 euler_order }: idTech4 is Z-up,
 	// right-handed, and idAngles apply yaw, then pitch, then roll.
 	{
@@ -548,6 +598,7 @@ void CArcadeIntegration::Frame( bool insideMapLoad ) {
 	PollRequests( insideMapLoad );
 
 	if ( !insideMapLoad ) {
+		PollInput();
 		Observe();
 		if ( state == STATE_LOADING ) {
 			AdvanceLoading();
@@ -594,9 +645,10 @@ void CArcadeIntegration::PollRequests( bool insideMapLoad ) {
 }
 
 void CArcadeIntegration::Dispatch( const uint8_t *data, size_t len ) {
-	// RpcRequest { 1 request_id, 2 service, 3 method, 4 timeout_ms, 5 request }
+	// RpcRequest { 1 request_id, 2 service, 3 method, 4 timeout_ms, 5 request, 6 instance }
 	ArcadeProto::Reader r( data, len );
 	uint64_t reqId = 0;
+	uint64_t instance = 0;
 	std::string service, method;
 	const uint8_t *body = nullptr;
 	size_t bodyLen = 0;
@@ -609,11 +661,16 @@ void CArcadeIntegration::Dispatch( const uint8_t *data, size_t len ) {
 		case 2: service = r.String(); break;
 		case 3: method = r.String(); break;
 		case 5: r.Bytes( body, bodyLen ); break;
+		case 6: instance = r.Varint(); break;
 		default: r.Skip( wt ); break;
 		}
 	}
 	if ( r.HadError() || reqId == 0 ) {
 		Log( LOG_WARN, "undecodable RpcRequest (%zu bytes)", len );
+		return;
+	}
+	if ( instance != 0 ) {
+		Fail( reqId, "this build hosts a single world; instance %llu does not exist", (unsigned long long)instance );
 		return;
 	}
 
@@ -1162,7 +1219,7 @@ void CArcadeIntegration::CompleteAttempt( Outcome outcome, double score, const c
 	ArcadeProto::Writer report;
 	report.Double( 2, GameTimeS() );
 	report.PutMessageAlways( REPORT_CHALLENGE_COMPLETED, done );
-	sdk.report( report.Data(), report.Size() );
+	sdk.report( 0, report.Data(), report.Size() );
 
 	static const char *OUTCOME_NAMES[] = { "unspecified", "success", "failure", "timeout", "aborted" };
 	Log( LOG_INFO, "challenge %s %s: %s (score %.3f)", attempt.challengeId.c_str(), OUTCOME_NAMES[outcome], detail, score );
@@ -1549,19 +1606,242 @@ void CArcadeIntegration::Observe() {
 	if ( now - lastMetricsPushMs >= arcade_metricsIntervalMs.GetInteger() ) {
 		lastMetricsPushMs = now;
 		double t = GameTimeS();
-		sdk.push_f32_metric( mHealth, (float)player->health, t );
-		sdk.push_f32_metric( mLoot, (float)loot, t );
-		sdk.push_f32_metric( mLightgem, player->GetCurrentLightgemValue() / LIGHTGEM_MAX, t );
-		sdk.push_f32_metric( mMaxAlert, (float)maxAlert, t );
-		sdk.push_f32_metric( mStealthScore, s.stealthScore, t );
-		sdk.push_f32_metric( mLootFraction, s.lootTotal > 0 ? (float)s.lootFound / s.lootTotal : 0.0f, t );
-		sdk.push_f32_metric( mKnockouts, (float)s.knockouts, t );
-		sdk.push_f32_metric( mKills, (float)s.kills, t );
-		sdk.push_f32_metric( mObjectivesComplete, (float)s.objectivesMandatoryComplete, t );
+		sdk.push_f32_metric( 0, mHealth, (float)player->health, t );
+		sdk.push_f32_metric( 0, mLoot, (float)loot, t );
+		sdk.push_f32_metric( 0, mLightgem, player->GetCurrentLightgemValue() / LIGHTGEM_MAX, t );
+		sdk.push_f32_metric( 0, mMaxAlert, (float)maxAlert, t );
+		sdk.push_f32_metric( 0, mStealthScore, s.stealthScore, t );
+		sdk.push_f32_metric( 0, mLootFraction, s.lootTotal > 0 ? (float)s.lootFound / s.lootTotal : 0.0f, t );
+		sdk.push_f32_metric( 0, mKnockouts, (float)s.knockouts, t );
+		sdk.push_f32_metric( 0, mKills, (float)s.kills, t );
+		sdk.push_f32_metric( 0, mObjectivesComplete, (float)s.objectivesMandatoryComplete, t );
 		if ( state == STATE_RUNNING ) {
-			sdk.push_f32_metric( mDistance, attempt.distanceUnits * UNITS_TO_METERS, t );
-			sdk.push_f32_metric( mLocationsVisited, (float)attempt.visited.size(), t );
+			sdk.push_f32_metric( 0, mDistance, attempt.distanceUnits * UNITS_TO_METERS, t );
+			sdk.push_f32_metric( 0, mLocationsVisited, (float)attempt.visited.size(), t );
 		}
+	}
+}
+
+// ===========================================================================
+// Frames out (render backend thread) and input in (main thread)
+// ===========================================================================
+
+void CArcadeIntegration::FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, void *user ) {
+	static_cast<CArcadeIntegration *>( user )->OnFrameCaptured( rgba, width, height, stride );
+}
+
+void CArcadeIntegration::OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride ) {
+	// Runs on the render backend thread, right before the buffers are swapped.
+	std::lock_guard<std::mutex> lock( captureMutex );
+	if ( !capturing || !active || !sdk.submit_frame ) {
+		return;
+	}
+	ArcadeFrame frame;
+	memset( &frame, 0, sizeof( frame ) );
+	frame.frame_index = framesSubmitted.load() + 1;
+	frame.game_time_s = GameTimeS();
+	frame.pixels = rgba;
+	frame.width = width;
+	frame.height = height;
+	frame.stride = stride;
+	frame.format = ARCADE_PIXEL_FORMAT_RGBA8;
+	frame.flags = ARCADE_FRAME_FLIP_Y;	// glReadPixels rows are bottom-up
+	ArcadeStatus status = sdk.submit_frame( 0, &frame );
+	if ( status == ARCADE_STATUS_OK ) {
+		framesSubmitted = frame.frame_index;
+	} else if ( inputWarnings++ < 5 ) {
+		common->Warning( "Arcade SDK: arcade_submit_frame failed (%d): %s", (int)status, sdk.last_error() );
+	}
+
+	if ( !dumpFramePath.empty() ) {
+		// what the SDK will show after honouring FLIP_Y: top row first, RGB
+		FILE *f = fopen( dumpFramePath.c_str(), "wb" );
+		if ( f ) {
+			fprintf( f, "P6\n%d %d\n255\n", width, height );
+			for ( int y = height - 1; y >= 0; y-- ) {
+				const unsigned char *row = rgba + y * stride;
+				for ( int x = 0; x < width; x++ ) {
+					fwrite( row + x * 4, 1, 3, f );
+				}
+			}
+			fclose( f );
+			common->Printf( "Arcade: wrote %s (%dx%d)\n", dumpFramePath.c_str(), width, height );
+		} else {
+			common->Warning( "Arcade: cannot write %s", dumpFramePath.c_str() );
+		}
+		dumpFramePath.clear();
+	}
+}
+
+void CArcadeIntegration::RequestFrameDump( const char *path ) {
+	std::lock_guard<std::mutex> lock( captureMutex );
+	dumpFramePath = path;
+}
+
+int CArcadeIntegration::KeyCodeToTdmKey( int code ) {
+	// arcade.sdk.v1.KeyCode (W3C KeyboardEvent.code positions) -> framework/KeyInput.h keynums
+	if ( code >= 20 && code <= 45 ) return 'a' + ( code - 20 );			// KEY_A .. KEY_Z
+	if ( code >= 6 && code <= 15 ) return '0' + ( code - 6 );			// DIGIT0 .. DIGIT9
+	if ( code >= 160 && code <= 171 ) return K_F1 + ( code - 160 );		// F1 .. F12
+	if ( code >= 172 && code <= 174 ) return K_F13 + ( code - 172 );	// F13 .. F15
+	switch ( code ) {
+	case 1: return '`';		// BACKQUOTE
+	case 2: return '\\';	// BACKSLASH
+	case 3: return '[';
+	case 4: return ']';
+	case 5: return ',';
+	case 16: return '=';
+	case 46: return '-';
+	case 47: return '.';
+	case 48: return '\'';
+	case 49: return ';';
+	case 50: return '/';
+	case 51: case 52: return K_ALT;
+	case 53: return K_BACKSPACE;
+	case 54: return K_CAPSLOCK;
+	case 55: return K_MENU;
+	case 56: case 57: return K_CTRL;
+	case 58: return K_ENTER;
+	case 59: return K_LWIN;
+	case 60: return K_RWIN;
+	case 61: case 62: return K_SHIFT;
+	case 63: return K_SPACE;
+	case 64: return K_TAB;
+	case 73: return K_DEL;
+	case 74: return K_END;
+	case 76: return K_HOME;
+	case 77: return K_INS;
+	case 78: return K_PGDN;
+	case 79: return K_PGUP;
+	case 80: return K_DOWNARROW;
+	case 81: return K_LEFTARROW;
+	case 82: return K_RIGHTARROW;
+	case 83: return K_UPARROW;
+	case 84: return K_KP_NUMLOCK;
+	case 85: return K_KP_INS;			// NUMPAD0
+	case 86: return K_KP_END;
+	case 87: return K_KP_DOWNARROW;
+	case 88: return K_KP_PGDN;
+	case 89: return K_KP_LEFTARROW;
+	case 90: return K_KP_5;
+	case 91: return K_KP_RIGHTARROW;
+	case 92: return K_KP_HOME;
+	case 93: return K_KP_UPARROW;
+	case 94: return K_KP_PGUP;			// NUMPAD9
+	case 95: return K_KP_PLUS;
+	case 100: return K_KP_DEL;			// NUMPAD_DECIMAL
+	case 101: return K_KP_SLASH;
+	case 102: return K_KP_ENTER;
+	case 103: return K_KP_EQUALS;
+	case 110: return K_KP_STAR;
+	case 114: return K_KP_MINUS;
+	case 115: return K_ESCAPE;
+	case 119: return K_SCROLL;
+	case 120: return K_PAUSE;
+	default: return 0;					// no TDM equivalent: ignored
+	}
+}
+
+void CArcadeIntegration::ApplyInputEvent( ArcadeProto::Reader event ) {
+	// InputEvent { oneof kind: 1 key { 1 code, 2 down }, 2 button { 1 button, 2 down },
+	//              3 mouse_move { 1 dx, 2 dy }, 4 wheel { 1 dx, 2 dy } }
+	int kind;
+	ArcadeProto::WireType kt;
+	if ( !event.Next( kind, kt ) || kt != ArcadeProto::WIRE_LENGTH ) {
+		return;
+	}
+	ArcadeProto::Reader body = event.ReadMessage();
+	int f;
+	ArcadeProto::WireType t;
+	int intA = 0;
+	bool down = false;
+	double dx = 0.0, dy = 0.0;
+	while ( body.Next( f, t ) ) {
+		if ( kind == INEV_MOUSE_MOVE || kind == INEV_WHEEL ) {
+			if ( f == 1 ) dx = body.Double(); else if ( f == 2 ) dy = body.Double(); else body.Skip( t );
+		} else {
+			if ( f == 1 ) intA = body.Int32(); else if ( f == 2 ) down = body.ReadBool(); else body.Skip( t );
+		}
+	}
+	switch ( kind ) {
+	case INEV_KEY: {
+		int key = KeyCodeToTdmKey( intA );
+		if ( key ) Sys_InjectKeyEvent( key, down );
+		break;
+	}
+	case INEV_BUTTON:
+		// MouseButton: 1 left, 2 right, 3 middle, 4 back, 5 forward -> K_MOUSE1..5
+		if ( intA >= 1 && intA <= 5 ) Sys_InjectMouseButton( intA - 1, down );
+		break;
+	case INEV_MOUSE_MOVE: {
+		// raw counts, +y down: the same convention as the window system's relative motion
+		mouseCarryX += dx;
+		mouseCarryY += dy;
+		int ix = (int)mouseCarryX, iy = (int)mouseCarryY;
+		mouseCarryX -= ix;
+		mouseCarryY -= iy;
+		Sys_InjectMouseDelta( ix, iy );
+		break;
+	}
+	case INEV_WHEEL: {
+		int notches = (int)( dy > 0 ? dy + 0.5 : dy - 0.5 );
+		if ( notches ) Sys_InjectMouseWheel( notches );
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void CArcadeIntegration::PollInput() {
+	if ( !sdk.poll_input ) {
+		return;
+	}
+	size_t n = 0;
+	ArcadeStatus status = sdk.poll_input( 0, framesSubmitted.load(), 0, inputBuf.data(), inputBuf.size(), &n );
+	if ( status == ARCADE_STATUS_BUFFER_TOO_SMALL ) {
+		inputBuf.resize( n );
+		return;
+	}
+	if ( status != ARCADE_STATUS_OK ) {
+		if ( inputWarnings++ < 5 ) {
+			Log( LOG_WARN, "arcade_poll_input failed (%d): %s", (int)status, sdk.last_error() );
+		}
+		return;
+	}
+	if ( n == 0 ) {
+		return;
+	}
+	// Input { 1 frame_index, 2 driven, 3 keys_down[], 4 buttons_down[], 5 mouse_dx, 6 mouse_dy,
+	//         7 wheel_dx, 8 wheel_dy, 9 events[], 10 dropped_events }
+	// The ordered edges (9) carry everything, motion included, so they are what we apply;
+	// the held-state and sums would double-count them.
+	ArcadeProto::Reader in( inputBuf.data(), n );
+	bool driven = false;
+	uint32_t dropped = 0;
+	std::vector<ArcadeProto::Reader> events;
+	int field;
+	ArcadeProto::WireType wt;
+	while ( in.Next( field, wt ) ) {
+		switch ( field ) {
+		case 2: driven = in.ReadBool(); break;
+		case 9: events.push_back( in.ReadMessage() ); break;
+		case 10: dropped = (uint32_t)in.Varint(); break;
+		default: in.Skip( wt ); break;
+		}
+	}
+	if ( in.HadError() ) {
+		if ( inputWarnings++ < 5 ) Log( LOG_WARN, "undecodable Input (%zu bytes)", n );
+		return;
+	}
+	if ( !driven ) {
+		return;
+	}
+	for ( size_t i = 0; i < events.size(); i++ ) {
+		ApplyInputEvent( events[i] );
+	}
+	if ( dropped && inputWarnings++ < 5 ) {
+		Log( LOG_WARN, "agent input: %u events dropped by the SDK this step", dropped );
 	}
 }
 
@@ -1582,7 +1862,7 @@ void CArcadeIntegration::ReportChallengeStarted() {
 	ArcadeProto::Writer report;
 	report.Double( 2, GameTimeS() );
 	report.PutMessageAlways( REPORT_CHALLENGE_STARTED, started );
-	sdk.report( report.Data(), report.Size() );
+	sdk.report( 0, report.Data(), report.Size() );
 }
 
 void CArcadeIntegration::ReportEvent( int oneofField, const ArcadeProto::Writer &body ) {
@@ -1591,7 +1871,7 @@ void CArcadeIntegration::ReportEvent( int oneofField, const ArcadeProto::Writer 
 	ArcadeProto::Writer report;
 	report.Double( 2, GameTimeS() );
 	report.Bytes( REPORT_EVENT, event.Data(), event.Size() );
-	ArcadeStatus status = sdk.report( report.Data(), report.Size() );
+	ArcadeStatus status = sdk.report( 0, report.Data(), report.Size() );
 	if ( status != ARCADE_STATUS_OK ) {
 		common->Warning( "Arcade SDK: arcade_report(event %d) failed (%d): %s", oneofField, (int)status, sdk.last_error() );
 	}

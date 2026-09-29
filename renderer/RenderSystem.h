@@ -254,4 +254,10 @@ void R_LightProjectionMatrix( const idVec3 &origin, const idPlane &rearPlane, id
 // used by the view shot taker
 void R_ScreenshotFilename( int &lastNumber, const char *base, idStr &fileName );
 
+// Frame capture hook (renderer/backend/FrameCapture.cpp): the callback receives a
+// downscaled RGBA8 copy of every presented frame, rows bottom-up, on the backend
+// thread right before the buffers are swapped. Pass a null callback to disable.
+typedef void ( *frameCaptureCallback_t )( const unsigned char *rgba, int width, int height, int stride, void *user );
+void R_SetFrameCaptureHook( int width, int height, frameCaptureCallback_t callback, void *user );
+
 #endif /* !__RENDERER_H__ */

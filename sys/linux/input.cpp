@@ -315,3 +315,46 @@ Sys_MapCharForKey
 unsigned char Sys_MapCharForKey( int _key ) {
 	return (unsigned char)_key;
 }
+
+/*
+=============================================================================
+Synthetic input (arcade SDK): mirrors what the GLFW callbacks above do.
+=============================================================================
+*/
+void Sys_InjectKeyEvent( int key, bool down ) {
+	if ( key <= 0 || key > 255 || !Posix_CanAddKeyboardPollEvent() ) {
+		return;
+	}
+	Posix_QueEvent( SE_KEY, key, down, 0, NULL );
+	Posix_AddKeyboardPollEvent( key, down );
+	if ( down && key >= 32 && key < 127 ) {
+		Posix_QueEvent( SE_CHAR, key, 0, 0, nullptr );
+	}
+}
+
+void Sys_InjectMouseDelta( int dx, int dy ) {
+	if ( ( dx == 0 && dy == 0 ) || !Posix_CanAddMousePollEvent() ) {
+		return;
+	}
+	Posix_QueEvent( SE_MOUSE, dx, dy, 0, NULL );
+	Posix_AddMousePollEvent( M_DELTAX, dx );
+	Posix_AddMousePollEvent( M_DELTAY, dy );
+}
+
+void Sys_InjectMouseButton( int button, bool down ) {
+	if ( button < 0 || button > 7 || !Posix_CanAddMousePollEvent() ) {
+		return;
+	}
+	Posix_QueEvent( SE_KEY, K_MOUSE1 + button, down, 0, NULL );
+	Posix_AddMousePollEvent( M_ACTION1 + button, down );
+}
+
+void Sys_InjectMouseWheel( int notches ) {
+	if ( notches == 0 || !Posix_CanAddMousePollEvent() ) {
+		return;
+	}
+	int key = notches < 0 ? K_MWHEELDOWN : K_MWHEELUP;
+	Posix_QueEvent( SE_KEY, key, true, 0, nullptr );
+	Posix_AddMousePollEvent( M_DELTAZ, notches );
+	Posix_QueEvent( SE_KEY, key, false, 0, nullptr );
+}

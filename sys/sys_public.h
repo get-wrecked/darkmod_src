@@ -396,6 +396,14 @@ void			Sys_EndMouseInputEvents( void );
 // operation like map loading, the system can release the mouse cursor
 // when in windowed mode
 void			Sys_GrabMouseCursor( bool grabIt );
+
+// Synthetic input (arcade SDK): feed keyboard/mouse input through the same paths the
+// window system's callbacks use, so binds, GUIs and usercmd generation all see it.
+// key is a TDM keynum (framework/KeyInput.h); button is 0-based (0 = K_MOUSE1).
+void			Sys_InjectKeyEvent( int key, bool down );
+void			Sys_InjectMouseDelta( int dx, int dy );
+void			Sys_InjectMouseButton( int button, bool down );
+void			Sys_InjectMouseWheel( int notches );		// >0 up / away from the user
 //stgatilov #4768: apply OS adjustments to raw mouse cursor movement (for one frame)
 //in case of Windows: sensitivity + acceleration from Control Panel, DPI scaling
 //it is used to make mouse in menu GUIs feel more like in OS

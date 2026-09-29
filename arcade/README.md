@@ -11,7 +11,7 @@ cvars); this directory is the packaging and submission side.
 | `LAUNCH.txt` | Human-readable notes shipped with the build. |
 | `stage_build.sh` | Assembles `out/client/` from the built engine, the SDK library, game data and the two missions (as the combined `fms/arcade` folder). |
 | `fm_overrides/` | Loose files for `fms/arcade` that resolve collisions between the two mission pk4s: the merged `tdm_custom_scripts.script` include list, merged sound shaders and subtitles, `darkmod.txt`. Loose files override pk4 contents. |
-| `fetch_sdk.sh` | Downloads the pinned SDK release: the shared library into `ThirdParty/arcade_sdk/linux_64/` and the CLI into `tools/`. |
+| `fetch_sdk.sh` | Downloads the pinned SDK release: the shared library into `ThirdParty/arcade_sdk/linux_64/` and the `arcade-sdk` CLI (submit, describe, debug app) into `tools/`. |
 
 `out/`, `tools/`, `arcade-registration.json` and the SDK `.so` are not committed.
 
@@ -55,9 +55,10 @@ include path and library copy in `CMakeLists.txt`. Everything else is additive.
 
 ```bash
 cd ../darkmod && ARCADE_SDK_NO_DEBUG_UI=1 ./thedarkmod.x64 +set arcade_enable 1 +set fs_currentfm arcade +set r_fullscreen 0
-../darkmod_src/arcade/tools/arcade-sdk-debug --sdk-addr 127.0.0.1:6006 --port 6060 --no-browser   # UI at http://127.0.0.1:6060
+../darkmod_src/arcade/tools/arcade-sdk debug --sdk-addr 127.0.0.1:6006 --port 6060 --no-browser   # UI at http://127.0.0.1:6060
 ```
 
 Headless: run the game under `xvfb-run` (Mesa llvmpipe renders fine); the in-game
 `screenshot` command yields black images there, so capture the X display with
-ImageMagick `import -window root` instead.
+ImageMagick `import -window root` instead. The debug app's Play tab shows the
+640x360 frames the SDK receives, which is what the agent sees.
