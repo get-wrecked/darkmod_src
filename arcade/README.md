@@ -90,6 +90,12 @@ cd ../darkmod && ARCADE_SDK_NO_DEBUG_UI=1 ./thedarkmod.x64 +set arcade_enable 1 
 ../darkmod_src/arcade/tools/arcade-sdk debug --sdk-addr 127.0.0.1:6006 --port 6060 --no-browser   # UI at http://127.0.0.1:6060
 ```
 
+`e2e_test.py` drives every challenge type and the input path through the debug
+app's HTTP API (all requests carry `"instance": 0`). The debug app ends a play
+session after 3 s without input traffic, so scripted drivers must keep sending
+(empty) `/api/play/input` requests while waiting; `arcade_debugInput 1` logs every
+poll and injected event in the game console.
+
 Headless: run the game under `xvfb-run` (Mesa llvmpipe renders fine); the in-game
 `screenshot` command yields black images there, so capture the X display with
 ImageMagick `import -window root` instead. The debug app's Play tab shows the

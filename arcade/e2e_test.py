@@ -42,6 +42,18 @@ def stop(reason='e2e'):
     post('stop_challenge', {"instance": 0, "reason": reason})
 
 
+def play(events):
+    return post('play/input', {"instance": 0, "events": events})
+
+
+def hold(sec):
+    """Keep the debug app's play session alive (it ends after 3 s without traffic)."""
+    t = time.time()
+    while time.time() - t < sec:
+        play([])
+        time.sleep(0.25)
+
+
 def tp(x, y, z, yaw=0):
     call('TeleportPlayer', {"position": {"x": x, "y": y, "z": z}, "yaw_deg": yaw})
     time.sleep(1.2)
@@ -129,6 +141,25 @@ def main():
             print("  explore/locations_visited =", visited)
             if not visited or visited[0] < 3:
                 failures.append(f"explore visited {visited}")
+
+    # input path: drive the instance through the SDK and check the game reacts
+    if start('explore', {"mission": "newjob", "difficulty": "easy", "minutes": 3}, 'e2e-input'):
+        post('play/drive', {"instance": 0, "take_over": True})
+        hold(0.5)
+        st0 = call('GetPlayerState')
+        play([{"type": "Key", "code": "KeyW", "down": True}]); hold(1.5); play([{"type": "Key", "code": "KeyW", "down": False}])
+        play([{"type": "Move", "dx": 300, "dy": 0}]); hold(0.5)
+        st1 = call('GetPlayerState')
+        moved = ((st1['position']['x'] - st0['position']['x']) ** 2 + (st1['position']['y'] - st0['position']['y']) ** 2) ** 0.5
+        turned = abs(st1['view']['yawDeg'] - st0['view']['yawDeg'])
+        print(f"  input: W moved {moved:.1f} units, mouse turned {turned:.1f} deg")
+        if moved < 10:
+            failures.append(f"injected W did not move the player ({moved:.1f} units)")
+        if turned < 5:
+            failures.append(f"injected mouse motion did not turn the view ({turned:.1f} deg)")
+        post('play/release', {"instance": 0})
+        stop()
+        s, _ = wait_completed(s, 10, 'e2e-input', 'OUTCOME_ABORTED')
 
     kinds = {}
     for rep in post('reports', {"since_seq": 0}):

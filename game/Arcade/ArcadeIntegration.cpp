@@ -44,6 +44,8 @@ idCVar arcade_metricsIntervalMs( "arcade_metricsIntervalMs", "100", CVAR_GAME | 
 	"How often the arcade SDK receives metric samples, in milliseconds.", 0, 10000 );
 idCVar arcade_mapLoadTimeoutSec( "arcade_mapLoadTimeoutSec", "120", CVAR_GAME | CVAR_INTEGER,
 	"Fail StartChallenge if the map has not loaded after this many seconds." );
+idCVar arcade_debugInput( "arcade_debugInput", "0", CVAR_GAME | CVAR_BOOL,
+	"Log every input poll result and injected event from the arcade SDK to the console." );
 idCVar arcade_buildId( "arcade_buildId", "", CVAR_GAME | CVAR_INIT,
 	"Build id registered with the arcade SDK (InitRequest.build_id). Empty = engine version + revision. Set it to the id the build is submitted under." );
 
@@ -1813,6 +1815,9 @@ void CArcadeIntegration::ApplyInputEvent( ArcadeProto::Reader event ) {
 			if ( f == 1 ) intA = body.Int32(); else if ( f == 2 ) down = body.ReadBool(); else body.Skip( t );
 		}
 	}
+	if ( arcade_debugInput.GetBool() ) {
+		common->Printf( "Arcade input: event kind %d value %d down %d dx %.1f dy %.1f\n", kind, intA, (int)down, dx, dy );
+	}
 	switch ( kind ) {
 	case INEV_KEY: {
 		int key = KeyCodeToTdmKey( intA );
@@ -1849,6 +1854,9 @@ void CArcadeIntegration::PollInput() {
 	}
 	size_t n = 0;
 	ArcadeStatus status = sdk.poll_input( 0, framesSubmitted.load(), inputBuf.data(), inputBuf.size(), &n );
+	if ( arcade_debugInput.GetBool() && ( status != ARCADE_STATUS_OK || n > 0 ) ) {
+		common->Printf( "Arcade input: poll status %d, %zu bytes (frame %llu)\n", (int)status, n, (unsigned long long)framesSubmitted.load() );
+	}
 	if ( status == ARCADE_STATUS_BUFFER_TOO_SMALL ) {
 		inputBuf.resize( n );
 		return;
