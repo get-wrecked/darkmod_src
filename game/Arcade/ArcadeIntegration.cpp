@@ -75,9 +75,53 @@ static const float LIGHTGEM_MAX = 32.0f;		// DARKMOD_LG_MAX
 // What the agent sees: every presented frame downscaled to this size (InitRequest.video)
 static const int ARCADE_VIDEO_WIDTH = 640;
 static const int ARCADE_VIDEO_HEIGHT = 360;
-static const int ARCADE_TICK_HZ = 60;
-// Pacing enum (arcade_sdk.proto)
-enum { PACING_REAL_TIME = 1, PACING_LOCKSTEP = 2 };
+
+// InitRequest.action_map: the stock key bindings, for the agent. Every key here is
+// one KeyCodeToTdmKey() translates.
+static const struct { const char *input; const char *action; } ACTION_MAP[] = {
+	{ "KeyW", "Move forward" }, { "ArrowUp", "Move forward" },
+	{ "KeyS", "Move backward" }, { "ArrowDown", "Move backward" },
+	{ "KeyA", "Strafe left" }, { "KeyD", "Strafe right" },
+	{ "ArrowLeft", "Turn left" }, { "ArrowRight", "Turn right" },
+	{ "MouseMove", "Look around" },
+	{ "Space", "Jump; hold to mantle onto ledges" },
+	{ "KeyC", "Mantle" },
+	{ "KeyX", "Crouch (toggle)" },
+	{ "ControlLeft", "Hold to creep (walk silently)" }, { "ControlRight", "Hold to creep (walk silently)" },
+	{ "ShiftLeft", "Hold to run" }, { "ShiftRight", "Hold to run" },
+	{ "AltLeft", "Hold to strafe with the mouse" }, { "AltRight", "Hold to strafe with the mouse" },
+	{ "KeyQ", "Lean left" }, { "KeyE", "Lean right" }, { "KeyF", "Lean forward" },
+	{ "MouseLeft", "Attack / use the held weapon or tool" },
+	{ "MouseRight", "Frob: pick up, open, use, talk to" },
+	{ "MouseMiddle", "Zoom" }, { "KeyZ", "Zoom" },
+	{ "MouseWheel", "Next / previous weapon" },
+	{ "Digit0", "Weapon: vine arrow" },
+	{ "Digit1", "Weapon: blackjack" },
+	{ "Digit2", "Weapon: shortsword" },
+	{ "Digit3", "Weapon: broadhead arrow" },
+	{ "Digit4", "Weapon: water arrow" },
+	{ "Digit5", "Weapon: fire arrow" },
+	{ "Digit6", "Weapon: rope arrow" },
+	{ "Digit7", "Weapon: gas arrow" },
+	{ "Digit8", "Weapon: noisemaker arrow" },
+	{ "Digit9", "Weapon: moss arrow" },
+	{ "BracketLeft", "Inventory: next item" }, { "BracketRight", "Inventory: previous item" },
+	{ "Minus", "Inventory: next group" }, { "Equal", "Inventory: previous group" },
+	{ "Enter", "Inventory: use the selected item" }, { "KeyU", "Inventory: use the selected item" },
+	{ "KeyR", "Inventory: drop the selected item" },
+	{ "Backspace", "Inventory: clear the selection" },
+	{ "KeyG", "Use the spyglass" },
+	{ "KeyL", "Toggle the lantern" },
+	{ "KeyI", "Inventory: cycle through readables" },
+	{ "KeyK", "Inventory: cycle through keys" },
+	{ "KeyP", "Inventory: cycle through lockpicks" },
+	{ "KeyM", "Show the map (again: next map)" },
+	{ "KeyV", "Show the compass" },
+	{ "KeyO", "Show the objectives" },
+	{ "Delete", "Look down" }, { "PageDown", "Look up" }, { "End", "Center the view" },
+	{ "Escape", "Open / close the menu" },
+};
+static const int NUM_ACTIONS = sizeof( ACTION_MAP ) / sizeof( ACTION_MAP[0] );
 // Input.events oneof / InputEvent members (arcade_sdk.proto)
 enum { INEV_KEY = 1, INEV_BUTTON = 2, INEV_MOUSE_MOVE = 3, INEV_WHEEL = 4 };
 
@@ -262,7 +306,7 @@ void CArcadeIntegration::Init() {
 	capturing = true;
 	R_SetFrameCaptureHook( ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT, FrameCaptureThunk, this );
 
-	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available, %dx%d frames, real-time pacing)",
+	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available, %dx%d frames, real time)",
 		missionsAvailable, NUM_MISSIONS, ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT );
 	common->Printf( "-------------------------------\n" );
 }
@@ -548,17 +592,23 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 	init.String( 7, VENDOR_SERVICE );
 	init.String( 8, VENDOR_EVENT_TYPE );
 
-	// ABI 2: pacing, frame size, tick rate, instances. The engine runs on the wall
-	// clock and one process hosts one world.
-	init.Enum( 10, PACING_REAL_TIME );
+	// ABI 2: frame size and instances. One process hosts one world.
 	{
 		Writer video;	// VideoSize { 1 width, 2 height }
 		video.UInt32( 1, ARCADE_VIDEO_WIDTH );
 		video.UInt32( 2, ARCADE_VIDEO_HEIGHT );
-		init.PutMessageAlways( 11, video );
+		init.PutMessageAlways( 10, video );
 	}
-	init.UInt32( 12, ARCADE_TICK_HZ );
-	init.UInt32( 13, 1 );
+	init.UInt32( 11, 1 );
+
+	// action_map (map<string, string> = repeated { 1 key, 2 value }): what the default
+	// binds do (DarkmodKeybinds.cfg as shipped), keys by their W3C KeyboardEvent.code.
+	for ( int i = 0; i < NUM_ACTIONS; i++ ) {
+		Writer entry;
+		entry.String( 1, ACTION_MAP[i].input );
+		entry.String( 2, ACTION_MAP[i].action );
+		init.PutMessageAlways( 12, entry );
+	}
 
 	// CoordinateSystem { 1 up, 2 handedness, 3 euler_order }: idTech4 is Z-up,
 	// right-handed, and idAngles apply yaw, then pitch, then roll.
@@ -1798,7 +1848,7 @@ void CArcadeIntegration::PollInput() {
 		return;
 	}
 	size_t n = 0;
-	ArcadeStatus status = sdk.poll_input( 0, framesSubmitted.load(), 0, inputBuf.data(), inputBuf.size(), &n );
+	ArcadeStatus status = sdk.poll_input( 0, framesSubmitted.load(), inputBuf.data(), inputBuf.size(), &n );
 	if ( status == ARCADE_STATUS_BUFFER_TOO_SMALL ) {
 		inputBuf.resize( n );
 		return;

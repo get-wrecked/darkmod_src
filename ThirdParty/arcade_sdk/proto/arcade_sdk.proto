@@ -3,7 +3,7 @@
 //
 // Compatibility rules (this file is read by shipped DLLs, shipped games, our
 // game machines and the debug app, all at different versions):
-// - ABI 2 (frames, input, pacing and instances) was a one-time break: builds on
+// - ABI 2 (frames, input and instances) was a one-time break: builds on
 //   ABI 1 are refused and resubmitted. From ABI 2 on the rules below hold again.
 // - Field numbers are append-only: never renumber, reuse or remove one.
 // - `oneof` members and enum values are append-only.
@@ -60,34 +60,33 @@ message InitRequest {
   // field set — because nothing the game hands us (a `Vec3`, a `Quat`, an
   // `Euler` in its RPCs and events) can be read without it.
   CoordinateSystem coordinate_system = 9;
-  // How the game's clock relates to its input. Required.
-  Pacing pacing = 10;
   // The size of every frame the game submits (`arcade_submit_frame`), for
   // every instance. Required; both sides even, 64..3840 x 64..2160. Frames are
   // what the agent sees, so this is a render target of the agent's, not the
   // player's window: 640x360 is plenty for today's models.
-  VideoSize video = 11;
-  // LOCKSTEP: simulation steps per second of game time, 1..1000 — frame
-  // `frame_index` is at `frame_index / tick_hz` seconds of game time.
-  // REAL_TIME: the rate the game renders at, as a hint (0 = unknown).
-  uint32 tick_hz = 12;
+  VideoSize video = 10;
   // The most instances one process of this build can host. 0 means 1; at
   // most 64. `arcade_init` fails when `ARCADE_SDK_INSTANCES` asks for more.
-  uint32 max_instances = 13;
-}
-
-// How a game's time advances against the agent's input.
-enum Pacing {
-  PACING_UNSPECIFIED = 0;
-  // The game runs on the wall clock and never waits: each frame it applies
-  // whatever input arrived since the previous one.
-  PACING_REAL_TIME = 1;
-  // The game advances one step per frame, and while an agent drives an
-  // instance it waits for that step's input (`arcade_poll_input` blocks) —
-  // faster or slower than real time, as fast as the agent decides. Every
-  // instance steps together: frame indices start at 0 and advance by one per
-  // step, the same for every instance.
-  PACING_LOCKSTEP = 2;
+  uint32 max_instances = 11;
+  // What each input does in the game: the actions an agent can take, e.g.
+  // {"KeyW": "Move forward", "Space": "Jump", "MouseLeft": "Fire",
+  // "MouseMove": "Look around"}. It is recorded with the build and is meant
+  // for the policy, so it knows what its keys and mouse do in this game.
+  //
+  // Each key names an input:
+  // - a key by its W3C `KeyboardEvent.code`, the `KeyCode` below without its
+  //   prefix, in CamelCase: "KeyW", "Digit1", "Space", "ShiftLeft",
+  //   "ArrowUp", "F5";
+  // - a mouse button: "MouseLeft", "MouseRight", "MouseMiddle", "MouseBack",
+  //   "MouseForward";
+  // - the mouse's motion, "MouseMove", or its wheel, "MouseWheel".
+  // Each value says what the input does in a few words ("Crouch", "Open
+  // inventory"): non-empty, one line, at most 128 bytes. Several inputs may
+  // do the same thing ("KeyW" and "ArrowUp" both "Move forward").
+  //
+  // Optional. Once declared, it should list every input the game responds
+  // to: an input left out is one the agent is told does nothing.
+  map<string, string> action_map = 12;
 }
 
 message VideoSize {
@@ -390,8 +389,9 @@ enum LogLevel {
 // keys and buttons are in, the mouse and wheel motion summed, and the ordered
 // edges that got there. Use whichever fits your input code; they agree.
 message Input {
-  // The step this input is for: apply it after frame `frame_index` and before
-  // simulating the next one (the `frame_index` passed to `arcade_poll_input`).
+  // The frame this input follows: apply it after frame `frame_index` and
+  // before simulating the next one (the `frame_index` passed to
+  // `arcade_poll_input`).
   uint64 frame_index = 1;
   // Whether an agent drives the instance. Undriven, the input is empty (no
   // key held) and the game should behave as if nobody touched it.
@@ -673,18 +673,9 @@ message InputPush {
 // Input for one instance, from the connection that drives it.
 message InstanceInput {
   uint32 instance = 1;
-  // REAL_TIME only: edges due now, in order; the game sees them at its next poll.
+  // Edges due now, in order; the game sees them at its next poll.
   repeated InputEvent events = 2;
-  // LOCKSTEP only: consecutive steps, the first one right after the last one
-  // pushed (or the step the game is at, for the first push).
-  repeated InputStep steps = 3;
   // The driver's own sequence number, echoed as `FrameMsg.input_seq` on the
   // frames produced after the game took this input.
-  uint64 seq = 4;
-}
-
-// The edges to apply at one lockstep step.
-message InputStep {
-  uint64 frame_index = 1;
-  repeated InputEvent events = 2;
+  uint64 seq = 3;
 }

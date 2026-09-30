@@ -848,6 +848,29 @@ static DIDEVICEOBJECTDATA polled_didod[ DINPUT_BUFFERSIZE ];  // Receives buffer
 static int diFetch;
 static byte toggleFetch[2][ 256 ];
 
+// DirectInput events in polled_didod from the last poll; synthetic ones follow them
+static int diKeyboardCount;
+static int diMouseCount;
+static int IN_PollDIKeyboard( void );
+static int IN_PollDIMouse( void );
+
+// synthetic input (arcade SDK, see Sys_InjectKeyEvent), consumed by the next poll
+#define MAX_SYNTH_EVENTS 64
+static struct { int key; bool down; } synthKeys[MAX_SYNTH_EVENTS];
+static int synthKeyCount;
+static struct { int action; int value; } synthMouse[MAX_SYNTH_EVENTS];
+static int synthMouseCount;
+
+/*
+====================
+Sys_PollKeyboardInputEvents
+====================
+*/
+int Sys_PollKeyboardInputEvents( void ) {
+	diKeyboardCount = IN_PollDIKeyboard();
+	return diKeyboardCount + synthKeyCount;
+}
+
 
 #if 1
 // I tried doing the full-state get to address a keyboard problem on one system,
@@ -858,7 +881,7 @@ static byte toggleFetch[2][ 256 ];
 Sys_PollKeyboardInputEvents
 ====================
 */
-int Sys_PollKeyboardInputEvents( void ) {
+static int IN_PollDIKeyboard( void ) {
     DWORD              dwElements;
     HRESULT            hr;
 
@@ -911,7 +934,7 @@ Fake events by getting the entire device state
 and checking transitions
 ====================
 */
-int Sys_PollKeyboardInputEvents( void ) {
+static int IN_PollDIKeyboard( void ) {
     HRESULT            hr;
 
     if( win32.g_pKeyboard == NULL ) {
@@ -966,6 +989,16 @@ Sys_PollKeyboardInputEvents
 ====================
 */
 int Sys_ReturnKeyboardInputEvent( const int n, int &ch, bool &state ) {
+	if ( n >= diKeyboardCount ) {
+		// synthetic (arcade SDK): already queued as SE_KEY by Sys_InjectKeyEvent
+		if ( n - diKeyboardCount >= synthKeyCount ) {
+			return 0;
+		}
+		ch = synthKeys[n - diKeyboardCount].key;
+		state = synthKeys[n - diKeyboardCount].down;
+		return ch;
+	}
+
 	ch = IN_DIMapKey( polled_didod[ n ].dwOfs );
 	state = (polled_didod[ n ].dwData & 0x80) == 0x80;
 	if ( ch == K_PRINT_SCR || ch == K_CTRL || ch == K_ALT || ch == K_RIGHT_ALT ) {
@@ -980,6 +1013,7 @@ int Sys_ReturnKeyboardInputEvent( const int n, int &ch, bool &state ) {
 
 
 void Sys_EndKeyboardInputEvents( void ) {
+	synthKeyCount = 0;
 }
 
 void Sys_QueMouseEvents( int dwElements ) {
@@ -1016,6 +1050,11 @@ void Sys_QueMouseEvents( int dwElements ) {
 //=====================================================================================
 
 int Sys_PollMouseInputEvents( void ) {
+	diMouseCount = IN_PollDIMouse();
+	return diMouseCount + synthMouseCount;
+}
+
+static int IN_PollDIMouse( void ) {
 	DWORD				dwElements;
 	HRESULT				hr;
 
@@ -1047,6 +1086,15 @@ int Sys_PollMouseInputEvents( void ) {
 }
 
 int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) {
+	if ( n >= diMouseCount ) {
+		if ( n - diMouseCount >= synthMouseCount ) {
+			return 0;
+		}
+		action = synthMouse[n - diMouseCount].action;
+		value = synthMouse[n - diMouseCount].value;
+		return 1;
+	}
+
 	int diaction = polled_didod[n].dwOfs;
 
 	if ( diaction >= DIMOFS_BUTTON0 && diaction <= DIMOFS_BUTTON7 ) {
@@ -1077,7 +1125,9 @@ int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) {
 	return 0;
 }
 
-void Sys_EndMouseInputEvents( void ) { }
+void Sys_EndMouseInputEvents( void ) {
+	synthMouseCount = 0;
+}
 
 unsigned char Sys_MapCharForKey( int key ) {
 	return (unsigned char)key;
@@ -1085,11 +1135,52 @@ unsigned char Sys_MapCharForKey( int key ) {
 
 /*
 =============================================================================
-Synthetic input (arcade SDK): not implemented on Windows yet, the arcade build
-is Linux-only. See sys/linux/input.cpp for the Linux version.
+Synthetic input (arcade SDK): each event is queued as the window procedure and
+DirectInput would queue it (for GUIs and the console) and appended to the polled
+keyboard/mouse streams after the DirectInput data (for usercmd generation).
+It does not depend on the window having focus or the mouse being grabbed.
 =============================================================================
 */
-void Sys_InjectKeyEvent( int key, bool down ) {}
-void Sys_InjectMouseDelta( int dx, int dy ) {}
-void Sys_InjectMouseButton( int button, bool down ) {}
-void Sys_InjectMouseWheel( int notches ) {}
+void Sys_InjectKeyEvent( int key, bool down ) {
+	if ( key <= 0 || key > 255 || synthKeyCount >= MAX_SYNTH_EVENTS ) {
+		return;
+	}
+	Sys_QueEvent( GetTickCount(), SE_KEY, key, down, 0, NULL );
+	synthKeys[synthKeyCount].key = key;
+	synthKeys[synthKeyCount++].down = down;
+	if ( down && key >= 32 && key < 127 ) {
+		Sys_QueEvent( GetTickCount(), SE_CHAR, key, 0, 0, NULL );
+	}
+}
+
+static void AddSynthMouseEvent( int action, int value ) {
+	synthMouse[synthMouseCount].action = action;
+	synthMouse[synthMouseCount++].value = value;
+}
+
+void Sys_InjectMouseDelta( int dx, int dy ) {
+	if ( ( dx == 0 && dy == 0 ) || synthMouseCount + 2 > MAX_SYNTH_EVENTS ) {
+		return;
+	}
+	Sys_QueEvent( GetTickCount(), SE_MOUSE, dx, dy, 0, NULL );
+	AddSynthMouseEvent( M_DELTAX, dx );
+	AddSynthMouseEvent( M_DELTAY, dy );
+}
+
+void Sys_InjectMouseButton( int button, bool down ) {
+	if ( button < 0 || button > 7 || synthMouseCount >= MAX_SYNTH_EVENTS ) {
+		return;
+	}
+	Sys_QueEvent( GetTickCount(), SE_KEY, K_MOUSE1 + button, down, 0, NULL );
+	AddSynthMouseEvent( M_ACTION1 + button, down );
+}
+
+void Sys_InjectMouseWheel( int notches ) {
+	if ( notches == 0 || synthMouseCount >= MAX_SYNTH_EVENTS ) {
+		return;
+	}
+	int key = notches < 0 ? K_MWHEELDOWN : K_MWHEELUP;
+	Sys_QueEvent( GetTickCount(), SE_KEY, key, true, 0, NULL );
+	Sys_QueEvent( GetTickCount(), SE_KEY, key, false, 0, NULL );
+	AddSynthMouseEvent( M_DELTAZ, notches );
+}

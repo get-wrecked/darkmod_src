@@ -36,16 +36,18 @@ frame every step and takes the agent's input back from it.
   flagged `ARCADE_FRAME_FLIP_Y`) and calls `CArcadeIntegration::OnFrameCaptured`,
   which submits it with `arcade_submit_frame(0, ...)`. This runs on the backend
   thread; `Shutdown()` unhooks and takes the capture mutex before the SDK goes
-  away. Pacing is `REAL_TIME` (the engine runs on the wall clock), `tick_hz` 60,
+  away. The engine runs on the wall clock (real time; SDK 2.2 has no lockstep),
   one instance per process (`max_instances` 1; RPCs for other instances fail).
 - **Input**: every normal frame `PollInput()` calls `arcade_poll_input(0, ...)`
   and replays the ordered events through `Sys_InjectKeyEvent`,
   `Sys_InjectMouseDelta`, `Sys_InjectMouseButton` and `Sys_InjectMouseWheel`
-  (`sys/linux/input.cpp`), which feed the same event queue and usercmd poll
-  buffers as the GLFW callbacks, so binds, GUIs and player movement all see the
+  (`sys/linux/input.cpp`, `sys/win32/win_input.cpp`), which feed the same event queue and usercmd poll
+  buffers as the GLFW callbacks (Linux) or the window procedure and DirectInput (Windows), so binds, GUIs and player movement all see the
   agent exactly as they would a person at the keyboard. `KeyCodeToTdmKey` maps
   the SDK's W3C key positions to TDM keynums; mouse motion is raw counts, +y
-  down, with sub-count remainders carried between frames.
+  down, with sub-count remainders carried between frames. `InitRequest.action_map`
+  (`ACTION_MAP` in `ArcadeIntegration.cpp`) tells the agent what the stock binds do;
+  keep it in step with the default `DarkmodKeybinds.cfg` and `KeyCodeToTdmKey`.
 
 The `Play` tab of `arcade-sdk debug` shows what the agent sees and lets you play
 through the SDK with your own keyboard and mouse: if that works, the agent's

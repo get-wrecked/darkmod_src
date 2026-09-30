@@ -11,11 +11,19 @@ in the SDK zip as `README.md`, next to:
 | `proto/arcade_common.proto` | Vectors, quaternions, transforms, colours — use these in your own `.proto`. |
 | `arcade-sdk.exe` / `arcade-sdk` | The command line: `arcade-sdk debug` is the debug app, a local web page to drive your integration while you build it; the other commands submit your builds (§8). |
 | `examples/host.c` | A complete minimal integration in C: one instance, frames, input, challenges. |
+| `CHANGELOG.md` | What changed in each version, and what a version number promises. |
 
-There is one zip per platform, `arcade_sdk-<sha>.zip` for Windows and
-`arcade_sdk-linux-<sha>.zip` for Linux, built from the same commit. The API,
-protos and `arcade-sdk` are identical; only the library's file name and how you
-load it differ. Below, "the DLL" means whichever you are shipping.
+There is one zip per platform and version, `arcade_sdk-windows-<version>.zip`
+for Windows and `arcade_sdk-linux-<version>.zip` for Linux, built from the
+same commit. The API, protos and `arcade-sdk` are identical; only the library's file
+name and how you load it differ. Below, "the DLL" means whichever you are
+shipping.
+
+Versions are [semantic](https://semver.org): a new major version (`2.0.0`)
+means you have to change your integration or rebuild, a minor or patch one
+does not. `arcade_version()` and `arcade-sdk --version` both report the version
+you have; `CHANGELOG.md` says what each one changed. Keep the library, header,
+protos and `arcade-sdk` from the same zip.
 
 ## 1. What you are building
 
@@ -24,19 +32,16 @@ environment, on a Windows or Linux machine we operate. The agent plays like a
 person — it sees frames and presses keys and moves the mouse — but both go
 through the SDK, not the screen and the OS:
 
-- **Frames**: every step, your game hands the SDK the image the agent should
+- **Frames**: every frame, your game hands the SDK the image the agent should
   see (`arcade_submit_frame`) — typically a small render target of its own,
   640×360 is plenty — with a frame index.
-- **Input**: every step, your game asks the SDK what the agent did
+- **Input**: every frame, your game asks the SDK what the agent did
   (`arcade_poll_input`): which keys and mouse buttons are held, how far the
   mouse and wheel moved, and the ordered key/button/mouse events that got
   there. Feed it to your input code the way you feed the OS's.
 - **Instances**: one process of your game can host several independent
   copies of the world (`arcade_instance_count()`, one by default), each with
   its own frames, input and challenges — so one machine runs several agents.
-- **Pacing**: your game declares whether it runs on the wall clock
-  (real time) or steps on the agent's input (lockstep: it waits for each
-  step's input, and runs as fast as the agent decides).
 
 What you add on top of that is structure:
 
@@ -64,14 +69,15 @@ What we need from you, in the end:
 
 1. `vendor.proto`: your RPC service and your event union (section 4).
 2. A build of your game with the SDK integrated (sections 5 and 6): frames
-   submitted and input taken every step, for every instance.
+   submitted and input taken every frame, for every instance.
 3. The list of challenges, designed together with us (section 3).
 4. A way to launch straight into a state where a challenge can start: an
    executable plus arguments, no launcher, no login, no menu to click through,
    no modal dialogs.
-5. Your pacing (real time or lockstep), your frame size, and how many
-   instances one process can host (`InitRequest.max_instances`; 1 is fine to
+5. Your frame size, and how many instances one process can host (`InitRequest.max_instances`; 1 is fine to
    start with).
+6. Your action map: what each key and mouse input does in your game
+   (`InitRequest.action_map`, section 5).
 
 ## 3. Design your challenges together with us
 
@@ -185,7 +191,7 @@ if (arcade_init(init, init_len) != ARCADE_STATUS_OK) {
 uint32_t n_worlds = arcade_instance_count();       // create this many worlds
 uint32_t distance_metric = arcade_metric_handle("distance/travelled_m");
 
-// Every step (frame), on the game thread.
+// Every frame, on the game thread.
 uint8_t buf[ARCADE_MAX_REQUEST_BYTES]; size_t n;
 while (arcade_poll_request(buf, sizeof buf, &n) == ARCADE_STATUS_OK && n > 0) {
     RpcRequest req = decode_RpcRequest(buf, n);
@@ -204,22 +210,21 @@ while (arcade_poll_request(buf, sizeof buf, &n) == ARCADE_STATUS_OK && n > 0) {
     }
 }
 for (uint32_t i = 0; i < n_worlds; i++) {
-    // What the agent sees: this step's image of world i.
-    ArcadeFrame f = { .frame_index = step, .game_time_s = now(), .pixels = worlds[i].rgba,
+    // What the agent sees: this frame's image of world i.
+    ArcadeFrame f = { .frame_index = frame, .game_time_s = now(), .pixels = worlds[i].rgba,
                       .width = 640, .height = 360, .format = ARCADE_PIXEL_FORMAT_RGBA8 };
     arcade_submit_frame(i, &f);
 }
 for (uint32_t i = 0; i < n_worlds; i++) {
-    // What the agent did: this step's input for world i.
+    // What the agent did: its input for world i since the last frame. Returns at once.
     uint8_t in[ARCADE_MAX_INPUT_BYTES]; size_t in_len;
-    while (arcade_poll_input(i, step, 5, in, sizeof in, &in_len) == ARCADE_STATUS_NOT_READY)
-        serve_requests();                         // lockstep only: keep serving RPCs while waiting
+    arcade_poll_input(i, frame, in, sizeof in, &in_len);
     Input input = decode_Input(in, in_len);
     apply_input(&worlds[i], &input);             // keys_down, mouse_dx/dy, ... or input.events
     arcade_push_f32_metric(i, distance_metric, worlds[i].distance, now());
 }
-simulate_one_step(worlds, n_worlds);
-step++;
+simulate_one_frame(worlds, n_worlds);
+frame++;
 
 // Whenever something happens — any thread.
 arcade_report(i, encode(Report{ .game_time_s = now(), .event = encode(GameEvent{ .item_picked_up = {...} }) }));
@@ -236,7 +241,7 @@ arcade_shutdown();
 | Rule | Why |
 |---|---|
 | Call `arcade_poll_request` **once per frame on the game thread**, draining until it returns 0 bytes. | The poll (and `arcade_poll_input`) is the SDK's liveness signal; a frame without one reads as a hang. Your RPC handlers then run on your thread, so game state is safe to touch. `RpcRequest.instance` says which world a request is for. |
-| Every step, for **every instance**: `arcade_submit_frame(i, N)`, then `arcade_poll_input(i, N, …)`, then simulate. | The frame is what the agent sees at step N; the input is what it did about it, applied before the next step. An instance that stops submitting frames reads as stalled. |
+| Every frame, for **every instance**: `arcade_submit_frame(i, N)`, then `arcade_poll_input(i, N, …)`, then simulate. | The frame is what the agent sees at frame N; the input is what it did since, applied before the next frame. An instance that stops submitting frames reads as stalled. Neither call blocks. |
 | Submit frames at **the size you declared** (`InitRequest.video`), in `RGBA8`, `BGRA8` or `RGB8`, any row stride, either way up. | The SDK converts them; anything else is `ARCADE_STATUS_VALIDATION_ERROR`. It copies the pixels before returning (about 0.3 ms at 640×360) and never blocks. |
 | Answer **every** request with `arcade_respond` (the method's response message) or `arcade_fail` (a message). | An unanswered request times out for the caller after `timeout_ms` (30 s by default) and blocks nothing else, but reads as a bug. |
 | The response must be **that method's** response type. | The SDK checks it decodes; a wrong type fails the request for its caller with `ARCADE_STATUS_VALIDATION_ERROR`. |
@@ -264,7 +269,6 @@ arcade_shutdown();
 | `SHUTDOWN_INCOMPLETE` | See above. |
 | `PANIC` | A bug in the SDK. Send us `arcade_sdk.log`. |
 | `INTERNAL` | Anything else; `arcade_last_error()` says what (typically the port is in use). |
-| `NOT_READY` | `arcade_poll_input` under lockstep: the agent drives this instance and its input for the step has not arrived within your timeout. Serve `arcade_poll_request` and poll again; do not simulate the step. |
 | `UNKNOWN_INSTANCE` | The instance is not below `arcade_instance_count()`. |
 
 `arcade_last_error()` returns the details of the last non-OK status **on the
@@ -290,7 +294,7 @@ static class Arcade {
     [DllImport("arcade_sdk", ExactSpelling = true)] public static extern uint arcade_metric_handle([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_push_f32_metric(uint instance, uint handle, float value, double gameTimeS);
     [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_submit_frame(uint instance, in ArcadeFrame frame);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_poll_input(uint instance, ulong frameIndex, uint timeoutMs, byte[] buf, nuint cap, out nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_poll_input(uint instance, ulong frameIndex, byte[] buf, nuint cap, out nuint len);
     public static string LastError() => Marshal.PtrToStringUTF8(arcade_last_error()) ?? "";
 }
 
@@ -319,10 +323,9 @@ Fill it once, at startup:
 | `services` | `["arcade.sdk.v1.ArcadeChallenges", "acme.roguelike.v1.Game"]` — every service you serve, by fully-qualified name. |
 | `event_type` | `"acme.roguelike.v1.GameEvent"`, or empty if you report no events. |
 | `coordinate_system` | **Required.** Your world frame: `up` (`AXIS_POS_Y`, `AXIS_POS_Z`, …), `handedness` (`HANDEDNESS_LEFT` or `HANDEDNESS_RIGHT`) and `euler_order`, the order your Euler angles apply in (`EULER_ORDER_YAW_PITCH_ROLL`, …). See below. |
-| `pacing` | **Required.** `PACING_REAL_TIME` or `PACING_LOCKSTEP` (see Pacing below). |
 | `video` | **Required.** The width and height of every frame you submit: even, 64..3840 × 64..2160. 640×360 is plenty for today's agents. |
-| `tick_hz` | Lockstep: **required**, your steps per second of game time (frame N is at N / `tick_hz` s). Real time: your usual frame rate, as a hint. |
 | `max_instances` | The most instances one process can host (0 = 1, at most 64). |
+| `action_map` | What each input does in your game: `{"KeyW": "Move forward", "Space": "Jump", "MouseLeft": "Fire", "MouseMove": "Look around"}`. See [Input](#input). |
 
 `coordinate_system` is how we read every `Vec3`, `Quat` and `Euler` you send.
 All three fields must be set; `arcade_init` refuses `UNSPECIFIED`.
@@ -351,8 +354,8 @@ field, and has no side effects when it does.
 
 ### Frames
 
-A frame is what the agent sees of one instance at one step: an `ArcadeFrame`
-naming your pixels, the step's `frame_index` and your game clock.
+A frame is what the agent sees of one instance at one moment: an `ArcadeFrame`
+naming your pixels, its `frame_index` and your game clock.
 
 - **Size**: exactly `InitRequest.video`. Render the agent's view into a render
   target of that size (or downscale into one); your window, its size and
@@ -363,8 +366,8 @@ naming your pixels, the step's `frame_index` and your game clock.
   next (0 = tightly packed). Alpha is ignored.
 - **Upside down?** `glReadPixels` (and a GL render texture read back in
   Unity) is bottom-up: set `flags = ARCADE_FRAME_FLIP_Y`.
-- **Frame index**: real time, any increasing number (your frame counter);
-  lockstep, the step — 0, 1, 2, … — the same for every instance.
+- **Frame index**: any strictly increasing number per instance — your frame
+  counter will do.
 - Read back without stalling your GPU: a ring of two or three staging
   buffers, submitting the one that finished.
 
@@ -373,8 +376,9 @@ look at it.
 
 ### Input
 
-`arcade_poll_input(i, N, timeout_ms, …)` gives you an encoded `Input` for
-instance `i` at step `N` — what to apply before simulating the next step:
+`arcade_poll_input(i, N, …)` gives you an encoded `Input` for instance `i`
+after frame `N` — everything that arrived since the previous poll, to apply
+before simulating the next frame. It returns at once:
 
 | Field | What it is |
 |---|---|
@@ -391,22 +395,22 @@ attempt ended, it disconnected), you get the releases for everything it held.
 Do not read the OS's keyboard or mouse for an instance under the agent: its
 input is this.
 
-### Pacing
+Tell us what the inputs do with `InitRequest.action_map`, one entry per input
+your game responds to: this is how the agent learns your controls.
 
-- **Real time** (`PACING_REAL_TIME`): your game runs on the wall clock and
-  never waits. `arcade_poll_input` returns at once, with everything that
-  arrived since the previous poll (`timeout_ms` is ignored).
-- **Lockstep** (`PACING_LOCKSTEP`): your game advances one step per frame and,
-  while an agent drives an instance, waits for that step's input:
-  `arcade_poll_input(i, N, timeout_ms, …)` blocks up to `timeout_ms` (at most
-  1000) and returns `ARCADE_STATUS_NOT_READY` if the input is not there yet.
-  Poll with a short timeout (a few ms) and serve `arcade_poll_request` between
-  attempts, so challenges can still be started while you wait. Step every
-  instance together: submit frame N for all of them, then take step N's input
-  for all of them. The frame after N is refused until step N's input was taken.
-  Undriven, the poll returns at once and you may run at your normal rate.
-  Lockstep games can run faster (or slower) than real time — keep simulation
-  time on `tick_hz`, not the wall clock.
+| Key | Names |
+|---|---|
+| A key | Its W3C `KeyboardEvent.code`, the `KeyCode` name without its prefix in CamelCase: `KeyW`, `Digit1`, `Space`, `ShiftLeft`, `ControlLeft`, `ArrowUp`, `F5`. |
+| A mouse button | `MouseLeft`, `MouseRight`, `MouseMiddle`, `MouseBack`, `MouseForward`. |
+| The mouse | `MouseMove` for its motion, `MouseWheel` for the wheel. |
+
+Each value says what the input does in a few words (`"Crouch"`, `"Open
+inventory"`): one line, at most 128 bytes. Several inputs may do the same
+thing: map both `KeyW` and `ArrowUp` to `"Move forward"`. An input you leave
+out is one the agent is told does nothing, so list them all.
+`arcade_init` refuses a key it does not know (`"W"` is not one; `"KeyW"` is)
+and names it in the error. The debug app's Play page shows the map as your
+game's controls.
 
 ### Instances
 
@@ -441,7 +445,7 @@ per-attempt `final_metrics`.
 3. **Play**: see each instance's frames and play it with your own keyboard and
    mouse — click the picture to capture the mouse, Esc to let go. This is
    exactly what the agent sees and sends: if you can play it here, the agent
-   can too. Under lockstep the page steps the game at `tick_hz`.
+   can too.
 4. **Challenges**: start each challenge with chosen variation values and watch
    the game do it; the resolved instruction comes back on the card.
 5. **Services**: call any of your RPCs from a form generated from your `.proto`,
@@ -480,8 +484,8 @@ arcade-sdk submit     # every build: uploads it
 
 ### What we run
 
-Today: **Linux x86-64 clients**, and their Linux dedicated servers. The build
-runs in a container with an X11 display (`$DISPLAY`), an NVIDIA GPU (Vulkan and
+**Linux x86-64 builds**, and **Windows x86-64 builds under Proton** (below),
+clients and their dedicated servers alike. The build runs in a container with an X11 display (`$DISPLAY`), an NVIDIA GPU (Vulkan and
 OpenGL), PulseAudio, and no network beyond loopback, as an unprivileged user.
 So:
 
@@ -503,8 +507,34 @@ So:
   SDK library stays in the client: the client serves the challenges and
   reports their outcomes. If either process exits, both are restarted.
 
-Windows clients are a shape the layout already has room for; ask us before
-building one.
+#### Windows builds, under Proton
+
+Our machines are all Linux, so a Windows build runs on them under
+[Proton](https://github.com/GloriousEggroll/proton-ge-custom) (GE-Proton 11:
+Wine, with DXVK and VKD3D-Proton translating Direct3D 9–12 to Vulkan). Say
+so in `arcade.toml`: `platform = "windows-x86_64"` and `proton = true` in
+`[client]`, and the same in `[server]` for a Windows server. `arcade-sdk
+init` writes both for a `.exe` entrypoint; `submit` refuses a Windows build
+without `proton = true`, since nothing else would run it.
+
+Set it once the build runs under Proton: on a Linux machine or a Steam Deck,
+add the `.exe` to Steam as a non-Steam game and force a Proton version in its
+properties, or start it with [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)
+(`GAMEID=0 umu-run Acme.exe --arcade`). Everything above holds, and:
+
+- The entrypoint is a `.exe`, `.bat` or `.cmd` (Wine has no PowerShell), and
+  `arcade_sdk.dll` ships in the folder instead of `libarcade_sdk.so`.
+- The first launch creates a fresh Wine prefix — a clean Windows with no
+  installer ever run in it — kept for later launches of the same build.
+  Ship whatever runtime DLLs the game needs beside it (the Visual C++ runtime,
+  say); do not rely on a redistributable being installed.
+- The environment variables in the table above reach the game as usual, and
+  the working directory is as `arcade.toml` gives it. The machine's
+  filesystem is drive `Z:`; stick to paths relative to your folder.
+- No anti-cheat and no DRM: they rarely work under Proton, and nothing here
+  signs in anyway.
+- `arcade-sdk describe` launches the build where you run it, so run it on
+  your Windows desk (natively — `proton` only matters on our machines).
 
 ### Who may submit
 
@@ -520,7 +550,8 @@ shows). `arcade-sdk whoami` shows who you are signed in as.
 `arcade-sdk init` asks for your game id, the first build id, the client's
 folder and entrypoint (an executable, or a script: `.sh` with a `#!` line,
 `.ps1`, `.bat`) and whether there is a server, and writes `arcade.toml` —
-every key commented. Every flag it asks about can also be passed
+every key commented, the platform taken from the entrypoint (a `.exe` is a
+Windows build, set to run under Proton). Every flag it asks about can also be passed
 (`--game-id`, `--client-dir`, `--client-entrypoint`, `--client-arg`,
 `--server-dir`, `--server-entrypoint`, `--server-arg`, `--ready-tcp-port`).
 Keep the file beside your build scripts and commit it:
@@ -545,6 +576,17 @@ ready_tcp_port = 7777       # the client starts once this accepts connections
 platform = "linux-x86_64"
 ```
 
+A Windows build instead (a Windows server likewise):
+
+```toml
+[client]                    # ships arcade_sdk.dll
+dir = "out/win64"
+entrypoint = "Acme.exe"
+args = ["-arcade", "-nointro"]
+platform = "windows-x86_64"
+proton = true               # we run it under Proton, on Linux
+```
+
 The `args` are the ones we launch with: together they must take the game
 straight into a state where a challenge can start. Without `ready_tcp_port`
 the client is started right after the server, so it must retry its connect.
@@ -564,11 +606,11 @@ It starts the server (and waits for its `ready_tcp_port`) if there is one,
 then the client with the SDK on a free loopback port and without the debug
 app, waits for `arcade_init` (up to `--timeout-s`, 300 s by default), reads
 the registration, checks the game has started polling and submitting frames
-(writing the first one as `arcade-frame.png` beside `arcade.toml`), drives a
-lockstep game through a few steps to see it wait for them, and stops both.
+(writing the first one as `arcade-frame.png` beside `arcade.toml`), and
+stops both.
 `--instances N` runs it with N instances. It prints what it found — every
-challenge with its variations and defaults, every metric, your pacing, frame
-size and instances, your services and event kinds — and writes
+challenge with its variations and defaults, every metric, your action map,
+your frame size and instances, your services and event kinds — and writes
 `arcade-registration.json` beside `arcade.toml`. Read the printout: it is
 exactly what we will see and play. A wrong default, a missing challenge or a
 metric you forgot to declare shows up here, not after a run. It also refuses
@@ -604,6 +646,34 @@ build id a second time is refused — so every iteration gets a new id
 acme_shooter@1.4.0` (or `@latest`) prints what a submission recorded,
 registration included; the portal lists your builds too.
 
+### Step 4: wait for the verdict
+
+Every build you submit is run once on arcade, on its own, to check that it
+works there: that it installs and launches, declares the challenges it
+registered at submit, and that every one of them starts and reports an outcome
+(any outcome: a `FAILURE` or `TIMEOUT` still shows the challenge works; what
+fails the check is a challenge that never reports). It usually takes a few
+hours.
+
+```bash
+arcade-sdk builds status acme_shooter@1.4.0 --wait
+```
+
+prints the verdict, and with `--wait` checks every minute until it is in:
+
+- **passed**: it works on arcade.
+- **failed**, with the first thing that went wrong: the build never became
+  ready (it crashed or hung at start-up; relaunching it on your side with the
+  same `exe` and `args` is the first thing to try), it declared other
+  challenges than its registration (run `describe` again and submit under a new
+  build id), or a challenge never reported how it ended before its time limit.
+  Fix it and submit a new build id.
+- **inconclusive**: our infrastructure failed every attempt; nothing about
+  your build. We look into these.
+
+`builds status` exits non-zero when the build failed, so CI can gate on it.
+The portal's build list shows the same verdict.
+
 The same SDK library you tested against runs in our environment; we replace
 nothing. What comes back: recordings of every attempt, and per challenge and
 build the success rate, your metrics and events, and how the agent's inputs
@@ -624,10 +694,6 @@ looked.
   bottom-up). **Red and blue swapped**: it is `BGRA8`, not `RGBA8`.
 - **Pausing when unfocused**: don't. The agent's input comes through the SDK,
   not the window; a game that pauses on focus loss stalls the attempt.
-- **Lockstep and time**: under lockstep, derive game time from the step
-  (`N / tick_hz`), never from the wall clock — the game runs as fast as the
-  agent decides, and a wall-clock timer makes challenges easier or harder
-  depending on inference speed.
 - **An ABI 1 build**: builds from before frames and input went through the SDK
   are refused. Rebuild against this SDK, `describe` and submit a new build id.
 - **Modal dialogs**: any dialog that needs a click to dismiss (crash reporter,

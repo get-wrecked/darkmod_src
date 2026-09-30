@@ -1,6 +1,6 @@
 /* host.c — a complete minimal integration of the arcade game SDK in C.
  *
- * Stands in for a game with one instance, running in real time: registers
+ * Stands in for a game with one instance: registers
  * two challenges and a metric, then runs a 60 Hz "frame loop" that serves
  * every RPC the SDK hands it, submits the frame the agent sees (a square on a
  * field), takes the agent's input (WASD / arrows / the mouse move the
@@ -223,14 +223,31 @@ int main(void) {
     init.n_metrics = 1; init.metrics = metrics;
     init.n_services = 1; init.services = services;
     init.coordinate_system = &frame;
-    /* Runs on the wall clock; submits 640x360 frames; one instance. */
+    /* Submits 640x360 frames; one instance. */
     Arcade__Sdk__V1__VideoSize video = ARCADE__SDK__V1__VIDEO_SIZE__INIT;
     video.width = WIDTH;
     video.height = HEIGHT;
-    init.pacing = ARCADE__SDK__V1__PACING__PACING_REAL_TIME;
     init.video = &video;
-    init.tick_hz = 60;
     init.max_instances = 1;
+    /* What each input does (see apply_input() above): what the agent is told its
+     * controls are. Keys by their W3C KeyboardEvent.code. */
+    static char *actions[][2] = {
+        {"KeyW", "Move up"}, {"ArrowUp", "Move up"},
+        {"KeyS", "Move down"}, {"ArrowDown", "Move down"},
+        {"KeyA", "Move left"}, {"ArrowLeft", "Move left"},
+        {"KeyD", "Move right"}, {"ArrowRight", "Move right"},
+        {"MouseMove", "Move the square"},
+    };
+    enum { N_ACTIONS = sizeof actions / sizeof actions[0] };
+    Arcade__Sdk__V1__InitRequest__ActionMapEntry action_entries[N_ACTIONS];
+    Arcade__Sdk__V1__InitRequest__ActionMapEntry *action_map[N_ACTIONS];
+    for (size_t k = 0; k < N_ACTIONS; k++) {
+        arcade__sdk__v1__init_request__action_map_entry__init(&action_entries[k]);
+        action_entries[k].key = actions[k][0];
+        action_entries[k].value = actions[k][1];
+        action_map[k] = &action_entries[k];
+    }
+    init.n_action_map = N_ACTIONS; init.action_map = action_map;
     /* No vendor.proto in this example: no vendor_descriptor_set, no event_type. */
 
     size_t init_len = arcade__sdk__v1__init_request__get_packed_size(&init);
@@ -267,10 +284,10 @@ int main(void) {
         f.format = ARCADE_PIXEL_FORMAT_RGBA8;
         check("arcade_submit_frame", arcade_submit_frame(0, &f));
 
-        /* ...and what it did about it, applied before the next step. Real
-         * time: returns at once with everything since the last poll. */
+        /* ...and what it did since the last frame, applied before the next
+         * step. Returns at once. */
         size_t in_len = 0;
-        ArcadeStatus polled = arcade_poll_input(0, frame, 0, input_buf, ARCADE_MAX_INPUT_BYTES, &in_len);
+        ArcadeStatus polled = arcade_poll_input(0, frame, input_buf, ARCADE_MAX_INPUT_BYTES, &in_len);
         if (polled == ARCADE_STATUS_OK) {
             Arcade__Sdk__V1__Input *in = arcade__sdk__v1__input__unpack(NULL, in_len, input_buf);
             if (in) {

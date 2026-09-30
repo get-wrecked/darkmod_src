@@ -50,7 +50,7 @@ public:
 	uint32_t ( *metric_handle )( const char * );
 	ArcadeStatus ( *push_f32_metric )( uint32_t, uint32_t, float, double );
 	ArcadeStatus ( *submit_frame )( uint32_t, const ArcadeFrame * );
-	ArcadeStatus ( *poll_input )( uint32_t, uint64_t, uint32_t, uint8_t *, size_t, size_t * );
+	ArcadeStatus ( *poll_input )( uint32_t, uint64_t, uint8_t *, size_t, size_t * );
 	ArcadeStatus ( *log )( int32_t, const char *, const char * );
 
 private:

@@ -1,0 +1,2 @@
+# cmd.exe (and Wine's cmd) want CRLF
+*.cmd text eol=crlf

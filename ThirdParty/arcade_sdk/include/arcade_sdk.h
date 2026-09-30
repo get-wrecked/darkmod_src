@@ -35,16 +35,6 @@
 // texture read back in Unity).
 #define ARCADE_FRAME_FLIP_Y 1
 
-// `ArcadePixelFormat` values.
-#define FORMAT_RGBA8 1
-
-#define FORMAT_BGRA8 2
-
-#define FORMAT_RGB8 3
-
-// `ArcadeFrame.flags`: rows are bottom-up.
-#define FLAG_FLIP_Y 1
-
 // Result of every SDK call. `arcade_last_error()` has the details of any
 // non-OK status, on the calling thread.
 typedef enum {
@@ -78,12 +68,8 @@ typedef enum {
     ARCADE_STATUS_PANIC = 11,
     // Anything else (a socket that could not be bound, ...).
     ARCADE_STATUS_INTERNAL = 12,
-    // `arcade_poll_input` under LOCKSTEP: an agent drives the instance and
-    // this step's input has not arrived within the timeout. Serve
-    // `arcade_poll_request` and poll again; do not simulate the step.
-    ARCADE_STATUS_NOT_READY = 13,
     // No such instance: it is not below `arcade_instance_count()`.
-    ARCADE_STATUS_UNKNOWN_INSTANCE = 14,
+    ARCADE_STATUS_UNKNOWN_INSTANCE = 13,
 } ArcadeStatus;
 
 // How a frame's pixels are laid out, byte by byte.
@@ -99,8 +85,7 @@ typedef enum {
 // One rendered frame of one instance, for `arcade_submit_frame`. The DLL
 // copies the pixels before returning.
 typedef struct {
-    // REAL_TIME: increasing. LOCKSTEP: the step, 0, 1, 2, … for every
-    // instance alike.
+    // Increasing, per instance: the game's own frame counter will do.
     uint64_t frame_index;
     // The game's clock, seconds.
     double game_time_s;
@@ -215,24 +200,19 @@ ArcadeStatus arcade_push_f32_metric(uint32_t instance,
 // frame is `InitRequest.video` in size. The DLL copies (and converts) the
 // pixels on the calling thread — about 0.3 ms at 640x360 — and never blocks.
 //
-// Each step of the game loop, per instance: `arcade_submit_frame(i, N)`,
-// then `arcade_poll_input(i, N, ..)`, then simulate. Under LOCKSTEP the
-// frame after N is refused until step N's input was taken.
+// Each frame of the game loop, per instance: `arcade_submit_frame(i, N)`,
+// then `arcade_poll_input(i, N, ..)`, then simulate.
 //
 // # Safety
 // `frame` must point to a valid `ArcadeFrame` whose `pixels` span its rows.
 ArcadeStatus arcade_submit_frame(uint32_t instance, const ArcadeFrame *frame);
 
-// Take `instance`'s input for step `frame_index` (the frame just submitted),
-// as an encoded `arcade.sdk.v1.Input` written into `buf`: the keys and
-// buttons held, the mouse and wheel motion, and the edges since the last
-// poll. `*out_len` receives its size. Call once per step per instance; it
-// also counts as the game's liveness tick.
-//
-// REAL_TIME: never blocks; `timeout_ms` is ignored. LOCKSTEP, while an agent
-// drives the instance: waits up to `timeout_ms` (at most 1000) for the step's
-// input, then `ARCADE_STATUS_NOT_READY` — serve `arcade_poll_request` and
-// call again. Undriven, it returns at once with `driven` false.
+// Take `instance`'s input after frame `frame_index` (the frame just
+// submitted), as an encoded `arcade.sdk.v1.Input` written into `buf`: the
+// keys and buttons held, the mouse and wheel motion, and the edges since the
+// last poll (`driven` false, nothing held, while no agent drives the
+// instance). `*out_len` receives its size. Call once per frame per instance;
+// it also counts as the game's liveness tick. Never blocks.
 //
 // `ARCADE_STATUS_BUFFER_TOO_SMALL`: `*out_len` is the size needed and nothing
 // was taken. A buffer of `ARCADE_MAX_INPUT_BYTES` never hits this.
@@ -241,7 +221,6 @@ ArcadeStatus arcade_submit_frame(uint32_t instance, const ArcadeFrame *frame);
 // `buf` must point to `cap` writable bytes; `out_len` must be writable.
 ArcadeStatus arcade_poll_input(uint32_t instance,
                                uint64_t frame_index,
-                               uint32_t timeout_ms,
                                uint8_t *buf,
                                size_t cap,
                                size_t *out_len);

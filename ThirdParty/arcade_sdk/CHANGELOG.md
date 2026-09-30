@@ -1,0 +1,112 @@
+# Changelog
+
+What changed in each release of the arcade game SDK: the library
+(`arcade_sdk.dll` / `libarcade_sdk.so`), its header and protos, and the
+`arcade-sdk` command line. It ships in the SDK zip beside the integration
+guide (`README.md`).
+
+## Versions
+
+The SDK follows [semantic versioning](https://semver.org). One version covers
+everything in the zip; `arcade_version()` and `arcade-sdk --version` both
+report it, followed by the commit it was built from (`1.2.0+0123456789ab`).
+
+- **Major** (`2.0.0`): you have to change your integration or rebuild your
+  game. A new C ABI (`ARCADE_SDK_ABI_VERSION`) is always a major release, and
+  builds made against the previous ABI are no longer accepted. Breaking
+  changes to the protos, `arcade.toml` or the command line are major too.
+- **Minor** (`1.1.0`): something new you can use — an optional field, a new
+  command or flag, a debug app feature. A game built against `1.0.0` keeps
+  working unchanged.
+- **Patch** (`1.0.1`): fixes, nothing to change on your side.
+
+Each release names its ABI. Within a major version it never changes, so a
+newer `1.x` library works with a game compiled against an older `1.x`
+header; the reverse is not promised, since a newer header may declare
+functions an older library lacks. Ship the library, header and protos from
+one zip, and use the `arcade-sdk` from that zip too.
+
+## Unreleased
+
+## 2.2.0 — 2026-09-30 (ABI 2)
+
+- **Build verification.** Every build you submit is now run once on arcade to
+  check that it launches, declares the challenges it registered, and reports an
+  outcome for each. `arcade-sdk builds status <game_id>@<build_id>` prints the
+  verdict (`passed`, `failed` or `inconclusive`, with why) and exits non-zero
+  when the build failed; `--wait` checks every minute until it is in.
+  `builds show` notes it too, `submit` says how to follow it, and the portal's
+  build list has a Verification column. See "Step 4: wait for the verdict" in
+  the guide.
+
+## 2.1.0 — 2026-09-30 (ABI 2)
+
+- **Windows builds, under Proton.** A Windows build can be submitted: set
+  `platform = "windows-x86_64"` and `proton = true` in its `[client]` (and
+  `[server]`) in `arcade.toml`, and we run it under Proton on our Linux
+  machines. `arcade-sdk init` writes both for a `.exe` entrypoint; `submit`
+  refuses a Windows build without `proton = true`. See "Windows builds, under
+  Proton" in the guide.
+- **Action map.** Say what each input does in your game with
+  `InitRequest.action_map` (optional): `{"KeyW": "Move forward", "Space":
+  "Jump", "MouseLeft": "Fire", "MouseMove": "Look around"}`, keys by their
+  W3C `KeyboardEvent.code`, mouse buttons as `MouseLeft` … `MouseForward`,
+  and `MouseMove` / `MouseWheel`. It is how the agent learns your controls.
+  `arcade_init` refuses an unknown input or an empty action;
+  `arcade-sdk describe` prints the map, `arcade-sdk submit` warns when there
+  is none, and the debug app's Play page lists it as your game's controls.
+
+## 2.0.0 — 2026-09-30 (ABI 2)
+
+- **ABI 2 — rebuild your game.** The agent now sees the frames you hand the
+  SDK and plays through the input the SDK hands you, instead of a screen
+  capture and OS input. Builds made against ABI 1 are no longer accepted:
+  rebuild against this SDK, run `arcade-sdk describe` and submit again.
+  - `InitRequest.video` (required): the size of the frames you submit.
+  - `arcade_submit_frame(instance, &ArcadeFrame)` every frame: RGBA8, BGRA8
+    or RGB8 at any stride, optionally bottom-up (`ARCADE_FRAME_FLIP_Y`),
+    with a strictly increasing frame index.
+  - `arcade_poll_input(instance, frame_index, …)` every frame, after
+    submitting it: an `Input` with the keys and buttons held, the mouse and
+    wheel motion, and the ordered edges since the last poll. It never blocks.
+  - Every per-world call names an instance: `arcade_report` and
+    `arcade_push_f32_metric` take one first, and `RpcRequest.instance` says
+    which instance a call is for.
+- **Several instances per process.** Declare how many copies of your world
+  one process can host (`InitRequest.max_instances`, default 1, at most 64);
+  we launch it with `ARCADE_SDK_INSTANCES` set to how many to host (1 when
+  unset), and `arcade_instance_count()` says how many that is. Each instance
+  is its own world with its own agent: challenges, reports, metrics, frames
+  and input are all per instance.
+- `arcade-sdk describe` checks that the game submits frames and writes the
+  first one to `arcade-frame.png` beside `arcade.toml`; `--instances N` runs
+  the build with N instances. `arcade-sdk submit` refuses a registration
+  without a frame size.
+- The debug app has a Play page: your frames live, and your keyboard and
+  mouse sent to the game (click the picture to capture them). With several
+  instances, pick one at the top of the page; Challenges can start on all.
+- The Windows zip is named `arcade_sdk-windows-<version>.zip`, like the
+  Linux one (`arcade_sdk-linux-<version>.zip`). 1.0.0's was
+  `arcade_sdk-1.0.0.zip`.
+
+## 1.0.0 — 2026-09-30 (ABI 1)
+
+The first versioned release. Earlier zips were named by commit only and
+reported `0.1.0` as their version.
+
+- The C ABI: `arcade_init` with an `InitRequest` declaring your game,
+  challenges, metrics, the RPC services you serve and your world's
+  `coordinate_system` (required); `arcade_poll_request`,
+  `arcade_respond` and `arcade_fail` to serve RPCs; `arcade_report`,
+  `arcade_metric_handle`, `arcade_push_f32_metric` and `arcade_log` for
+  outcomes, events, metrics and log lines; `arcade_shutdown`;
+  `arcade_abi_version`, `arcade_version` and `arcade_last_error`.
+- `proto/arcade_sdk.proto` (the messages and the `ArcadeChallenges` service)
+  and `proto/arcade_common.proto` (vectors, quaternions, transforms, colours).
+- `arcade-sdk debug`: the debug app, launched by the library when
+  `arcade-sdk` sits beside it — challenges, typed RPC forms from your
+  `.proto`, live metrics and events.
+- Build submission: `arcade-sdk login` with your vendor account, `init` to
+  write `arcade.toml` (client, and an optional dedicated server), `describe`
+  to record what the build declares, `submit` to upload it, `builds show` and
+  `whoami`.

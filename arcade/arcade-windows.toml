@@ -1,0 +1,27 @@
+# The Windows arcade build of The Dark Mod, run under Proton on arcade's Linux machines.
+# Every command takes it with --config:  tools/arcade-sdk.exe --config arcade-windows.toml describe|submit
+# (describe runs natively on a Windows desk). The Linux build is arcade.toml.
+# Directories are relative to this file; paths inside one are relative to it.
+# Stage the client folder first: ./stage_build.sh windows (see README.md in this directory).
+
+# Your game id, exactly as the build registers it (InitRequest.game_id).
+game_id = "thedarkmod"
+# This build's version, [A-Za-z0-9._-]. Never reused, and not shared with the Linux
+# build: bump it for every submit (or pass `arcade-sdk submit --build-id`).
+# stage_build.sh writes the same id into run_arcade.cmd (+set arcade_buildId).
+build_id = "2.15-arcade-20260930-693d138-win"
+# Recorded on the submission: what changed, what to look at.
+notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, Windows x64 under Proton, SDK 2.2.0 (ABI 2): 640x360 frames submitted from the render backend, agent input injected through the engine input paths (not the OS), action map from the stock binds, real-time, 1 instance. Challenges on A New Job and Tears of St. Lucia: complete-mission, per-mission objective and reach, steal-loot, knockout, explore."
+
+# The game the agent plays. It embeds the arcade SDK library (arcade_sdk.dll).
+[client]
+dir = "out/windows"
+# A .cmd (Wine has no PowerShell): sets arcade_enable, the build id, window size from SCREEN_WIDTH/HEIGHT.
+entrypoint = "run_arcade.cmd"
+# Together these must take the game straight into a state where a challenge can
+# start: no launcher, login or menu.
+args = []
+# The .proto source of our services: what benchmarks against them are written from.
+vendor_proto = "vendor.proto"
+platform = "windows-x86_64"
+proton = true

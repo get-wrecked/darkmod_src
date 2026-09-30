@@ -7,9 +7,9 @@ game_id = "thedarkmod"
 # This build's version, [A-Za-z0-9._-]. Never reused: bump it for every submit
 # (or pass `arcade-sdk submit --build-id`). stage_build.sh writes the same id into
 # run_arcade.sh (+set arcade_buildId) so the registration and the artifact agree.
-build_id = "2.15-arcade-20260929-693d138"
+build_id = "2.15-arcade-20260930-693d138"
 # Recorded on the submission: what changed, what to look at.
-notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, SDK ABI 2 (0.1.0+074b9f239370): 640x360 frames submitted from the render backend, agent input injected through the engine input paths, real-time pacing, 1 instance. Challenges on A New Job and Tears of St. Lucia: complete-mission, per-mission objective and reach, steal-loot, knockout, explore."
+notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, SDK 2.2.0 (ABI 2): 640x360 frames submitted from the render backend, agent input injected through the engine input paths, real-time, 1 instance, action map from the stock binds. Challenges on A New Job and Tears of St. Lucia: complete-mission, per-mission objective and reach, steal-loot, knockout, explore."
 
 # The game the agent plays. It embeds the arcade SDK library.
 [client]
@@ -21,5 +21,5 @@ entrypoint = "run_arcade.sh"
 args = []
 # The .proto source of our services: what benchmarks against them are written from.
 vendor_proto = "vendor.proto"
-# Only linux-x86_64 runs today.
+# The Windows build (under Proton) is arcade-windows.toml.
 platform = "linux-x86_64"

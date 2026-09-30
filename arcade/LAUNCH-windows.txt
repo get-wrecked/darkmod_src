@@ -1,0 +1,14 @@
+The Dark Mod 2.15 + arcade SDK integration (build @BUILD_ID@), Windows x86_64, runs under Proton
+
+Build id:          thedarkmod@@BUILD_ID@
+Launch:            run_arcade.cmd         (reads SCREEN_WIDTH / SCREEN_HEIGHT, default 2560x1440; plain window, not exclusive fullscreen)
+Equivalent:        TheDarkModx64.exe +set arcade_enable 1 +set arcade_buildId @BUILD_ID@ +set fs_currentfm arcade +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440 +set tdm_player_wait_until_ready 0
+Ready state:       main menu; StartChallenge loads the requested mission map itself (prologue9 or saintlucia, 4-6 s), sets the difficulty, no clicks needed.
+SDK:               arcade_sdk.dll @SDK_VERSION@ (ABI 2) next to the executable, with vcruntime140.dll; port 6006 (ARCADE_SDK_PORT); log arcade_sdk.log next to the executable.
+Frames/input:      640x360 RGBA frames submitted every rendered frame (real time); agent input taken from the SDK each frame and injected into the engine's input paths (not the OS), so focus and mouse grab do not matter; the action map (InitRequest.action_map) describes the stock binds. One instance per process.
+Schema:            vendor.proto (service thedarkmod.v1.Game, event union thedarkmod.v1.GameEvent).
+Challenges:        complete-mission, newjob-objective, stlucia-objective, newjob-reach, stlucia-reach, steal-loot, knockout, explore -- see ARCADE_README.md.
+Missions:          fms/arcade holds "A New Job" (map prologue9) and "Tears of St. Lucia" (map saintlucia) as one fan mission folder.
+Requirements:      OpenGL 3.3 (under Proton: Wine's opengl32 on the host driver). Static C runtime in the engine; vcruntime140.dll shipped for the SDK. Offline, no installer, no login.
+Config/saves:      written inside the build folder (fs_savepath = the executable's folder, which is also where fms/arcade is looked up), as on Linux.
+Focus:             the game keeps running when the window loses focus.
