@@ -257,7 +257,10 @@ void R_ScreenshotFilename( int &lastNumber, const char *base, idStr &fileName );
 // Frame capture hook (renderer/backend/FrameCapture.cpp): the callback receives a
 // downscaled RGBA8 copy of every presented frame, rows bottom-up, on the backend
 // thread right before the buffers are swapped. Pass a null callback to disable.
-typedef void ( *frameCaptureCallback_t )( const unsigned char *rgba, int width, int height, int stride, void *user );
-void R_SetFrameCaptureHook( int width, int height, frameCaptureCallback_t callback, void *user );
+typedef uint64_t ( *frameCaptureClock_t )( void *user );
+typedef void ( *frameCaptureCallback_t )( const unsigned char *rgba, int width, int height, int stride, uint64_t observedNs, void *user );
+// Clock is sampled before blitting/readback. Clearing the hook waits for an
+// in-flight callback, so its owner may safely unload after this returns.
+void R_SetFrameCaptureHook( int width, int height, frameCaptureClock_t clock, frameCaptureCallback_t callback, void *user );
 
 #endif /* !__RENDERER_H__ */

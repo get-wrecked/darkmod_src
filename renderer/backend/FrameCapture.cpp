@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "renderer/tr_local.h"
 #include "renderer/backend/FrameBuffer.h"
 #include "renderer/backend/FrameBufferManager.h"
+#include <mutex>
 
 /*
 =============================================================================
@@ -32,6 +33,8 @@ vid_restart like every other one.
 */
 
 static frameCaptureCallback_t captureCallback = nullptr;
+static frameCaptureClock_t captureClock = nullptr;
+static std::mutex captureHookMutex;
 static void *captureUser = nullptr;
 static int captureWidth = 0;
 static int captureHeight = 0;
@@ -40,21 +43,25 @@ static int captureFboWidth = 0;
 static int captureFboHeight = 0;
 static idList<byte> capturePixels;
 
-void R_SetFrameCaptureHook( int width, int height, frameCaptureCallback_t callback, void *user ) {
+void R_SetFrameCaptureHook( int width, int height, frameCaptureClock_t clock, frameCaptureCallback_t callback, void *user ) {
+	std::lock_guard<std::mutex> lock( captureHookMutex );
 	if ( !callback ) {
 		captureCallback = nullptr;
+		captureClock = nullptr;
 		captureUser = nullptr;
 		return;
 	}
 	captureWidth = width;
 	captureHeight = height;
 	captureUser = user;
-	captureCallback = callback;		// set last: the backend tests this pointer
+	captureClock = clock;
+	captureCallback = callback;
 }
 
 void RB_CaptureFrameForHook() {
+	std::lock_guard<std::mutex> lock( captureHookMutex );
 	frameCaptureCallback_t callback = captureCallback;
-	if ( !callback || captureWidth <= 0 || captureHeight <= 0 || !frameBuffers || !frameBuffers->defaultFbo ) {
+	if ( !callback || !captureClock || captureWidth <= 0 || captureHeight <= 0 || !frameBuffers || !frameBuffers->defaultFbo ) {
 		return;
 	}
 	if ( glConfig.vidWidth <= 0 || glConfig.vidHeight <= 0 ) {
@@ -62,6 +69,7 @@ void RB_CaptureFrameForHook() {
 	}
 
 	TRACE_GL_SCOPE( "FrameCapture" )
+	const uint64_t observedNs = captureClock( captureUser );
 
 	if ( !captureFbo ) {
 		captureFbo = frameBuffers->CreateFromGenerator( "arcadeCapture", []( FrameBuffer *fbo ) {
@@ -86,5 +94,5 @@ void RB_CaptureFrameForHook() {
 	qglReadPixels( 0, 0, captureWidth, captureHeight, GL_RGBA, GL_UNSIGNED_BYTE, capturePixels.Ptr() );
 	frameBuffers->defaultFbo->Bind();
 
-	callback( capturePixels.Ptr(), captureWidth, captureHeight, stride, captureUser );
+	callback( capturePixels.Ptr(), captureWidth, captureHeight, stride, observedNs, captureUser );
 }

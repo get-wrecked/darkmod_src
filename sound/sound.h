@@ -290,6 +290,12 @@ typedef struct {
 } soundDecoderInfo_t;
 
 
+// Capture callbacks borrow normalized interleaved stereo PCM until return.
+// The supplied clock is also used by video; firstSampleNs is a source time,
+// independent of when a consumer happens to drain its queue.
+typedef uint64_t ( *soundCaptureClock_t )( void *user );
+typedef void ( *soundCaptureCallback_t )( const float *samples, uint32_t frames, uint64_t firstSampleNs, bool discontinuity, void *user );
+
 class idSoundSystem {
 public:
 	virtual					~idSoundSystem( void ) {}
@@ -309,6 +315,11 @@ public:
 
 	// async loop, when the sound driver uses a write strategy
 	virtual int				AsyncUpdateWrite( int time ) = 0;
+
+	// Available only in arcade mode with OpenAL Soft loopback. Clearing the hook
+	// waits for the current callback before the consumer can unload its library.
+	virtual bool IsCaptureAvailable() const = 0;
+	virtual void SetCaptureHook( soundCaptureClock_t clock, soundCaptureCallback_t callback, void *user ) = 0;
 
 	// it is a good idea to mute everything when starting a new level,
 	// because sounds may be started before a valid listener origin

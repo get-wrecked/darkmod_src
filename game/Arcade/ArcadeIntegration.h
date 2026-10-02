@@ -226,8 +226,10 @@ private:
 	const char *PlayerLocationName( idPlayer *player ) const;
 
 	// --- frames out, input in (SDK ABI 2)
-	static void FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, void *user );
-	void OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride );	// backend thread
+	static uint64_t CaptureClockThunk( void *user );
+	static void AudioCaptureThunk( const float *samples, uint32_t frames, uint64_t firstSampleNs, bool discontinuity, void *user );
+	static void FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, uint64_t observedNs, void *user );
+	void OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride, uint64_t observedNs );	// backend thread
 	void PollInput();
 	void ApplyInputEvent( ArcadeProto::Reader inputEvent );
 	static int KeyCodeToTdmKey( int keyCode );
@@ -285,6 +287,11 @@ private:
 	std::mutex captureMutex;			// held while a frame is being submitted; taken by Shutdown
 	std::atomic<uint64_t> framesSubmitted;
 	std::atomic<bool> capturing;
+	std::atomic<double> captureGameTime { 0.0 };
+	uint32_t frameWarnings = 0;
+	bool audioDiscontinuity = true;	// audio thread only after hook registration
+	std::atomic<uint64_t> audioBlocksSubmitted { 0 };
+	std::atomic<uint64_t> audioBlocksDropped { 0 };
 	double mouseCarryX, mouseCarryY;	// fractional mouse motion not yet injected
 	int inputWarnings;
 	std::string dumpFramePath;			// arcade_dumpframe: write the next captured frame here (PPM, upright)

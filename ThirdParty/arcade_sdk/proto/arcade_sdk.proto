@@ -12,7 +12,8 @@
 //
 // One game process hosts N *instances* (independent copies of the game world,
 // "sims"), N = `ARCADE_SDK_INSTANCES` (1 when unset). Everything per game —
-// challenges, reports, metrics, frames, input — is addressed to an instance.
+// challenges, reports, metrics, frames, audio, input — is addressed to an
+// instance.
 //
 // The DLL is a generic proto-RPC endpoint. Every RPC — ours (`ArcadeChallenges`)
 // and the vendor's (their `vendor.proto` services) — reaches the game as an
@@ -104,6 +105,22 @@ message InitRequest {
   // the order of `challenges`. At most 1024 cases; no two may resolve to the
   // same challenge and values.
   repeated BenchmarkCase benchmark = 13;
+  // The format of the sound every instance submits (`arcade_submit_audio`):
+  // what the agent hears, and what the episode recordings carry beside the
+  // frames. Your mixer's own output format will do (48000 Hz stereo, most
+  // often); the machine converts it to what the policy listens at.
+  //
+  // Optional. Without it the game submits no audio and the agent hears
+  // silence.
+  AudioFormat audio = 14;
+}
+
+// `InitRequest.audio`.
+message AudioFormat {
+  // Sample frames per second, 8000..192000.
+  uint32 sample_rate = 1;
+  // 1 (mono) or 2 (stereo: left, right). Mix anything wider down to stereo.
+  uint32 channels = 2;
 }
 
 // One run of a challenge in `InitRequest.benchmark`.

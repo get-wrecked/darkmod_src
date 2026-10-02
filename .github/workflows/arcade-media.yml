@@ -1,0 +1,15 @@
+name: Arcade media clock
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  audio-clock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Check variable cadence, discontinuities and clock restart
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined arcade/tests/audio_capture_clock.cpp -o /tmp/audio-clock
+          /tmp/audio-clock

@@ -3,8 +3,9 @@
  * Stands in for a game with one instance: registers
  * two challenges and a metric, then runs a 60 Hz "frame loop" that serves
  * every RPC the SDK hands it, submits the frame the agent sees (a square on a
- * field), takes the agent's input (WASD / arrows / the mouse move the
- * square) and pushes a metric sample per frame. Protobuf encoding uses protobuf-c
+ * field) and the sound it hears (a tone that rises as the square does),
+ * takes the agent's input (WASD / arrows / the mouse move the square) and
+ * pushes a metric sample per frame. Protobuf encoding uses protobuf-c
  * (https://github.com/protobuf-c/protobuf-c): generate the message code with
  *
  *     protoc -I<sdk>/proto --c_out=. arcade_sdk.proto arcade_common.proto
@@ -17,7 +18,7 @@
  * or, on Linux,
  *
  *     cc host.c arcade_sdk.pb-c.c arcade_common.pb-c.c protobuf-c.c \
- *        -I<sdk>/include -L<sdk> -larcade_sdk -Wl,-rpath,'$ORIGIN'
+ *        -I<sdk>/include -L<sdk> -larcade_sdk -lm -Wl,-rpath,'$ORIGIN'
  *
  * With any other protobuf library the shape is identical: encode an
  * InitRequest, poll RpcRequests, decode the request message named by
@@ -28,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 #ifdef _WIN32
 #include <windows.h>
 #define SLEEP_MS(ms) Sleep(ms)
@@ -41,10 +43,11 @@
 
 #define CHALLENGES_SERVICE "arcade.sdk.v1.ArcadeChallenges"
 
-static double game_time_s(void) {
-    static double t = 0.0;
-    return t += 1.0 / 60.0;
-}
+static uint64_t media_anchor_ns;
+static uint64_t mixed_frames;
+static double game_time;
+
+static double game_time_s(void) { return game_time; }
 
 static void check(const char *what, ArcadeStatus status) {
     if (status != ARCADE_STATUS_OK) {
@@ -54,6 +57,16 @@ static void check(const char *what, ArcadeStatus status) {
 
 #define WIDTH 640
 #define HEIGHT 360
+#define SAMPLE_RATE 48000
+/* One 60 Hz frame of sound. A real game submits from its audio thread, one
+ * mixer buffer at a time; this loop stands in for both. */
+#define FRAMES_PER_STEP (SAMPLE_RATE / 60)
+
+/* Quotient/remainder avoids multiplying the whole long-running sample index. */
+static uint64_t sample_time_ns(uint64_t sample) {
+    return media_anchor_ns + (sample / SAMPLE_RATE) * UINT64_C(1000000000)
+        + (sample % SAMPLE_RATE) * UINT64_C(1000000000) / SAMPLE_RATE;
+}
 
 /* The one world: where the player's square is. */
 static float player_x = WIDTH / 2, player_y = HEIGHT / 2;
@@ -229,6 +242,11 @@ int main(void) {
     video.height = HEIGHT;
     init.video = &video;
     init.max_instances = 1;
+    /* Mixes 48 kHz stereo; 16-bit here (float works the same way). */
+    Arcade__Sdk__V1__AudioFormat audio = ARCADE__SDK__V1__AUDIO_FORMAT__INIT;
+    audio.sample_rate = SAMPLE_RATE;
+    audio.channels = 2;
+    init.audio = &audio;
     /* What each input does (see apply_input() above): what the agent is told its
      * controls are. Keys by their W3C KeyboardEvent.code. */
     static char *actions[][2] = {
@@ -261,10 +279,17 @@ int main(void) {
     }
     uint32_t distance_metric = arcade_metric_handle("distance/travelled_m");
 
+    /* One logical media clock shared by this synthetic renderer/mixer.
+     * Real engines map their DSP and render clocks to arcade_time_ns(), with
+     * device latency accounted for if timestamps describe physical playback. */
+    media_anchor_ns = arcade_time_ns();
+
     /* ---- the frame loop ------------------------------------------------ */
     uint8_t *buf = malloc(ARCADE_MAX_REQUEST_BYTES);
     uint8_t *input_buf = malloc(ARCADE_MAX_INPUT_BYTES);
     for (uint64_t frame = 0; frame < 60 * 30; frame++) {      /* 30 seconds */
+        uint64_t observation_ns = sample_time_ns(mixed_frames);
+        game_time = (double)mixed_frames / SAMPLE_RATE;
         size_t n = 0;
         while (arcade_poll_request(buf, ARCADE_MAX_REQUEST_BYTES, &n) == ARCADE_STATUS_OK && n > 0) {
             Arcade__Sdk__V1__RpcRequest *req = arcade__sdk__v1__rpc_request__unpack(NULL, n, buf);
@@ -282,7 +307,26 @@ int main(void) {
         f.width = WIDTH;
         f.height = HEIGHT;
         f.format = ARCADE_PIXEL_FORMAT_RGBA8;
-        check("arcade_submit_frame", arcade_submit_frame(0, &f));
+        /* Preserve observation_ns if render/readback later moves to a worker. */
+        check("arcade_submit_frame_at", arcade_submit_frame_at(0, &f, observation_ns));
+
+        /* ...and hears: 220 Hz at the bottom, two octaves up at the top. */
+        static int16_t samples[FRAMES_PER_STEP * 2];
+        static double phase = 0.0;
+        double hz = 220.0 * pow(4.0, 1.0 - player_y / HEIGHT);
+        for (int k = 0; k < FRAMES_PER_STEP; k++) {
+            int16_t v = (int16_t)(sin(phase * 6.283185307179586) * 3000.0);
+            samples[2 * k] = samples[2 * k + 1] = v;
+            phase = fmod(phase + hz / SAMPLE_RATE, 1.0);
+        }
+        ArcadeAudio a = {0};
+        a.samples = samples;
+        a.frame_count = FRAMES_PER_STEP;
+        a.format = ARCADE_SAMPLE_FORMAT_S16;
+        /* A real mixer callback must not log or retry QUEUE_FULL. Continue
+         * advancing its sample clock even when the whole buffer is rejected. */
+        check("arcade_submit_audio_at", arcade_submit_audio_at(0, &a, sample_time_ns(mixed_frames)));
+        mixed_frames += FRAMES_PER_STEP;
 
         /* ...and what it did since the last frame, applied before the next
          * step. Returns at once. */
@@ -300,12 +344,17 @@ int main(void) {
 
         check("arcade_push_f32_metric",
               arcade_push_f32_metric(0, distance_metric, player_x / WIDTH * 10.0f, game_time_s()));
-        SLEEP_MS(16);
+        /* Pace the logical simulation clock; sleeping a fixed 16 ms would
+         * run an 800-sample/48 kHz mixer faster than real time. */
+        uint64_t deadline = sample_time_ns(mixed_frames);
+        uint64_t now = arcade_time_ns();
+        if (deadline > now) SLEEP_MS((unsigned)((deadline - now + 999999) / 1000000));
     }
     free(input_buf);
     free(buf);
 
     /* ---- shutdown ------------------------------------------------------ */
+    /* Real integrations stop and join audio/render callbacks before this. */
     status = arcade_shutdown();
     if (status == ARCADE_STATUS_SHUTDOWN_INCOMPLETE) {
         fprintf(stderr, "SDK threads still running; not unloading: %s\n", arcade_last_error());
