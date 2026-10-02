@@ -7,9 +7,9 @@ game_id = "thedarkmod"
 # This build's version, [A-Za-z0-9._-]. Never reused: bump it for every submit
 # (or pass `arcade-sdk submit --build-id`). stage_build.sh writes the same id into
 # run_arcade.sh (+set arcade_buildId) so the registration and the artifact agree.
-build_id = "2.15-arcade-20261002-693d138"
+build_id = "2.15-avsync.20261002.1"
 # Recorded on the submission: what changed, what to look at.
-notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, SDK 2.2.1+bf5f6c81 (ABI 2): 640x360 frames submitted from the render backend, agent input injected through the engine input paths, real-time, 1 instance, action map from the stock binds. Agent input is gameplay only (menu, console, save/load keys are dropped). Challenges on A New Job and Tears of St. Lucia: complete-mission (stealth/kill rules), per-mission objective, reach (start tiers), item, unlock, steal-loot, knockout, pickpocket, stay-hidden, explore; InitRequest.benchmark ranks 48 cases."
+notes = "Synchronized Arcade media candidate: OpenAL final mix at 44100 Hz stereo, source-timed 640x360 video, SDK fc970a05a52fb4abec49122e42928c574da6e2e0 (ABI 2). Existing 48 benchmark cases on A New Job and Tears of St. Lucia. Depends on ai-research PR 4128."
 
 # The game the agent plays. It embeds the arcade SDK library.
 [client]

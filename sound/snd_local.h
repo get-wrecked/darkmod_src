@@ -24,6 +24,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "../framework/UsercmdGen.h"
 #include "sound.h"
 #include "efxlib.h"
+#include "AudioCaptureClock.h"
+#include <mutex>
 
 // demo sound commands
 typedef enum {
@@ -699,6 +701,9 @@ public:
 	virtual int				AsyncUpdateWrite( int time ) override;
 	// direct mixing called from the sound driver thread for OSes that support it
 	virtual int				AsyncMix( int soundTime, float *mixBuffer ) override;
+	bool IsCaptureAvailable() const override;
+	void SetCaptureHook( soundCaptureClock_t clock, soundCaptureCallback_t callback, void *user ) override;
+	int CaptureLoopback( int inTime );
 
 	virtual void			SetMute( bool mute ) override;
 
@@ -765,6 +770,14 @@ public:
 
 	ALCdevice				*openalDevice;
 	ALCcontext				*openalContext;
+	LPALCRENDERSAMPLESSOFT renderCaptureSamples = nullptr;
+	std::mutex captureHookMutex;
+	soundCaptureClock_t captureClock = nullptr;
+	soundCaptureCallback_t captureCallback = nullptr;
+	void *captureUser = nullptr;
+	AudioCaptureClock captureTimeline;
+	bool captureSilent = true;
+	float captureSamples[AudioCaptureClock::BlockFrames * 2];
 	ALsizei					openalSourceCount;
 	openalSource_t			openalSources[256];
 

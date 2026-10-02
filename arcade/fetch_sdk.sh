@@ -12,11 +12,11 @@
 # Usage:  ./fetch_sdk.sh [linux] [windows]     (default: both)
 #   SDK_VERSION=x.y.z   a GitHub release (needs the GitHub CLI, gh, signed in to an account that may read the repository)
 #   SDK_SHA=<commit>    instead: a per-commit build from the SDK bucket,
-#                       gs://gi-prod-games-cluster-app/arcade_sdk[-windows]-<sha>.zip (needs gsutil with read access)
+#                       gs://gi-prod-games-cluster-app/arcade_sdk[-linux]-<sha>.zip (needs gsutil with read access)
 set -eu
 
 SDK_VERSION=${SDK_VERSION:-2.2.1}
-SDK_SHA=${SDK_SHA:-bf5f6c81d0385db35bbbda987d842a38d72f5d4b}
+SDK_SHA=${SDK_SHA:-fc970a05a52fb4abec49122e42928c574da6e2e0}
 SDK_REPO=${SDK_REPO:-get-wrecked/ai-research}
 SDK_BUCKET=${SDK_BUCKET:-gs://gi-prod-games-cluster-app}
 PLATFORMS=${*:-linux windows}
@@ -29,7 +29,7 @@ mkdir -p "$HERE/tools"
 
 for p in $PLATFORMS; do
 	if [ -n "$SDK_SHA" ]; then
-		case "$p" in linux) zip="arcade_sdk-$SDK_SHA.zip" ;; *) zip="arcade_sdk-$p-$SDK_SHA.zip" ;; esac
+		case "$p" in linux) zip="arcade_sdk-linux-$SDK_SHA.zip" ;; windows) zip="arcade_sdk-$SDK_SHA.zip" ;; *) echo "unknown platform: $p" >&2; exit 1 ;; esac
 		echo "fetching $zip from $SDK_BUCKET"
 		gsutil -q cp "$SDK_BUCKET/$zip" "$TMP/$zip"
 	else

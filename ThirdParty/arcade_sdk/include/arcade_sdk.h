@@ -4,7 +4,7 @@
  * Regenerate: ARCADE_SDK_UPDATE_HEADER=1 cargo test -p arcade_sdk header_up_to_date
  *
  * Byte buffers are serialized protobuf messages from arcade_sdk.proto, except
- * a frame's pixels (ArcadeFrame).
+ * a frame's pixels (ArcadeFrame) and a run of sound's samples (ArcadeAudio).
  * See README.md (the vendor guide) for the integration contract. */
 
 #ifndef ARCADE_SDK_H
@@ -15,6 +15,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+// At most 100 ms in a submission, in addition to the absolute frame limit.
+#define MAX_SUBMIT_MS 100
 
 // The C ABI version. A game compares `arcade_abi_version()` against the
 // value it was compiled with; a mismatch means a different header.
@@ -27,6 +30,17 @@
 // The largest `Input` `arcade_poll_input` will ever hand out; a buffer this
 // big never sees `ARCADE_STATUS_BUFFER_TOO_SMALL`.
 #define ARCADE_MAX_INPUT_BYTES 65536
+
+// Absolute sample-frame limit. Also limit each submission to
+// `sample_rate * ARCADE_MAX_AUDIO_MS / 1000` frames; split longer buffers.
+#define ARCADE_MAX_AUDIO_FRAMES 16384
+
+// Maximum duration per audio submission, including the timed variant.
+#define ARCADE_MAX_AUDIO_MS 100
+
+// `ArcadeAudio.flags`: the source restarted,
+// jumped or lost samples. The first buffer after it starts a new run.
+#define ARCADE_AUDIO_DISCONTINUITY 1
 
 // `arcade_report`'s instance for a `LogLine` about the whole process.
 #define ARCADE_NO_INSTANCE 4294967295
@@ -58,7 +72,8 @@ typedef enum {
     ARCADE_STATUS_UNKNOWN_REQUEST = 7,
     // A caller asked for a service or method the game does not serve.
     ARCADE_STATUS_UNKNOWN_METHOD = 8,
-    // Too many requests are waiting to be polled.
+    // Too many requests, or audio ingress is full/busy. Audio is rejected
+    // as a whole; keep the source timeline advancing and mark any lost time.
     ARCADE_STATUS_QUEUE_FULL = 9,
     // `arcade_shutdown` could not join every SDK thread in time. Do NOT
     // unload the DLL; call `arcade_shutdown` again later or let the process
@@ -81,6 +96,17 @@ typedef enum {
     // R, G, B.
     ARCADE_PIXEL_FORMAT_RGB8 = 3,
 } ArcadePixelFormat;
+
+// How a run of sound's samples are stored. Either way they are interleaved
+// (left, right, left, ... in stereo), `InitRequest.audio.channels` per
+// sample frame.
+typedef enum {
+    // 32-bit float, -1.0..1.0 (louder is clipped). Unity's
+    // `OnAudioFilterRead`, Unreal's submix buffers, FMOD and Wwise mixes.
+    ARCADE_SAMPLE_FORMAT_F32 = 1,
+    // Signed 16-bit integer.
+    ARCADE_SAMPLE_FORMAT_S16 = 2,
+} ArcadeSampleFormat;
 
 // One rendered frame of one instance, for `arcade_submit_frame`. The DLL
 // copies the pixels before returning.
@@ -105,6 +131,22 @@ typedef struct {
     uint32_t reserved;
 } ArcadeFrame;
 
+// One run of sound one instance just mixed, for `arcade_submit_audio`. The
+// DLL copies the samples before returning.
+typedef struct {
+    // `frame_count` sample frames of `InitRequest.audio.channels` samples
+    // each, interleaved, in `format`: `float*` for F32, `int16_t*` for S16.
+    const void *samples;
+    // Sample frames (per channel), 1..`ARCADE_MAX_AUDIO_FRAMES`.
+    uint32_t frame_count;
+    // An `ArcadeSampleFormat` value.
+    uint32_t format;
+    // 0, or `ARCADE_AUDIO_DISCONTINUITY` after a source reset or loss.
+    uint32_t flags;
+    // Must be 0.
+    uint32_t reserved;
+} ArcadeAudio;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -118,6 +160,13 @@ const char *arcade_version(void);
 // Details of the last non-OK status returned on the calling thread (empty
 // string after an OK). Valid until the next SDK call on this thread.
 const char *arcade_last_error(void);
+
+// Shared monotonic media clock, in Unix nanoseconds. Call on the game thread
+// before starting audio callbacks (also initialized by `arcade_init`). Record
+// this at the original frame observation, before asynchronous GPU readback.
+// Map the engine's DSP/sample clock into this same domain for audio. It does
+// not follow wall-clock adjustments during the process. 0 means failure.
+uint64_t arcade_time_ns(void);
 
 // Register the game and start the SDK: `init_request` is an encoded
 // `arcade.sdk.v1.InitRequest`. Starts the SDK's threads and its loopback RPC
@@ -206,6 +255,48 @@ ArcadeStatus arcade_push_f32_metric(uint32_t instance,
 // # Safety
 // `frame` must point to a valid `ArcadeFrame` whose `pixels` span its rows.
 ArcadeStatus arcade_submit_frame(uint32_t instance, const ArcadeFrame *frame);
+
+// Submit a frame with its original observation timestamp on `arcade_time_ns`'s
+// clock. Preserve this timestamp while GPU readback or worker queues complete.
+// The current transport quantizes frame timestamps to one millisecond.
+// Copies/converts pixels on this calling thread; use a worker if necessary.
+//
+// # Safety
+// Same pointer and pixel-buffer requirements as `arcade_submit_frame`.
+ArcadeStatus arcade_submit_frame_at(uint32_t instance,
+                                    const ArcadeFrame *frame,
+                                    uint64_t capture_unix_ns);
+
+// Approximate audio capture: anchors the first buffer at submission, then
+// advances by sample count. Submit zero PCM through silence, or mark resumed
+// PCM with `ARCADE_AUDIO_DISCONTINUITY`. Set that flag after any non-OK result.
+// For synchronized capture use `arcade_submit_audio_at` with original source
+// time. Copies PCM into preallocated storage without waiting or allocating;
+// `QUEUE_FULL` rejects the whole buffer. It does not wait for network I/O.
+//
+// # Safety
+// `audio` must point to a valid `ArcadeAudio` whose samples hold `frame_count`
+// interleaved sample frames, aligned for their type. Stop callbacks before
+// shutdown/unload. Submit in order from one producer per instance.
+ArcadeStatus arcade_submit_audio(uint32_t instance, const ArcadeAudio *audio);
+
+// Submit audio with the first sample's source/presentation timestamp on the
+// same clock as `arcade_submit_frame_at`. Derive timestamps from a mapped DSP
+// sample clock, not callback arrival, GPU readback completion or queue drain.
+// Silence may be omitted: advance the source clock across it. Set
+// `ARCADE_AUDIO_DISCONTINUITY` after a reset or loss. Each submission is at
+// most 100 ms and `ARCADE_MAX_AUDIO_FRAMES`; split larger mixer buffers and
+// advance each piece's timestamp by its sample offset.
+//
+// No allocation, logging, network I/O or waiting on locks occurs here.
+// `QUEUE_FULL` means the whole buffer was rejected (including lock contention).
+// Continue the source timeline; the next accepted buffer marks that loss.
+//
+// # Safety
+// Same pointer, ordering and lifecycle requirements as `arcade_submit_audio`.
+ArcadeStatus arcade_submit_audio_at(uint32_t instance,
+                                    const ArcadeAudio *audio,
+                                    uint64_t first_sample_unix_ns);
 
 // Take `instance`'s input after frame `frame_index` (the frame just
 // submitted), as an encoded `arcade.sdk.v1.Input` written into `buf`: the

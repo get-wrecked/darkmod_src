@@ -356,6 +356,11 @@ void CArcadeIntegration::Init() {
 		return;
 	}
 	common->Printf( "Loaded %s (version %s)\n", sdk.GetPath(), sdk.version() );
+	const int asyncSound = cvarSystem->GetCVarInteger( "com_asyncSound" );
+	if ( !soundSystem->IsCaptureAvailable() || ( asyncSound != 1 && asyncSound != 3 ) ) {
+		common->FatalError( "Arcade requires the OpenAL loopback mixer; start with +set arcade_enable 1 and sound enabled" );
+		return;
+	}
 
 	DiscoverMissions();
 	if ( missionsAvailable == 0 ) {
@@ -373,6 +378,7 @@ void CArcadeIntegration::Init() {
 	}
 
 	active = true;
+	sdk.time_ns();	// initialize the SDK's clock on the game thread
 	ResolveMetricHandles();
 	pollBuf.resize( ARCADE_MAX_REQUEST_BYTES );
 	inputBuf.resize( ARCADE_MAX_INPUT_BYTES );
@@ -384,8 +390,14 @@ void CArcadeIntegration::Init() {
 
 	// frames: every presented frame, downscaled, goes to the SDK from the render backend
 	framesSubmitted = 0;
+	frameWarnings = 0;
+	captureGameTime = GameTimeS();
+	audioDiscontinuity = true;
+	audioBlocksSubmitted = 0;
+	audioBlocksDropped = 0;
 	capturing = true;
-	R_SetFrameCaptureHook( ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT, FrameCaptureThunk, this );
+	soundSystem->SetCaptureHook( CaptureClockThunk, AudioCaptureThunk, this );
+	R_SetFrameCaptureHook( ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT, CaptureClockThunk, FrameCaptureThunk, this );
 
 	Log( LOG_INFO, "The Dark Mod arcade integration ready (%d of %d missions available, %dx%d frames, real time)",
 		missionsAvailable, NUM_MISSIONS, ARCADE_VIDEO_WIDTH, ARCADE_VIDEO_HEIGHT );
@@ -403,10 +415,13 @@ void CArcadeIntegration::Shutdown() {
 		state = STATE_IDLE;
 	}
 
-	// stop the backend from submitting frames, and wait for one in flight to finish
-	R_SetFrameCaptureHook( 0, 0, nullptr, nullptr );
+	// Both setters wait for their in-flight callback before the SDK can unload.
+	soundSystem->SetCaptureHook( nullptr, nullptr, nullptr );
+	R_SetFrameCaptureHook( 0, 0, nullptr, nullptr, nullptr );
 	capturing = false;
 	std::lock_guard<std::mutex> captureLock( captureMutex );
+	common->Printf( "Arcade audio: %llu blocks submitted, %llu dropped\n",
+		(unsigned long long)audioBlocksSubmitted.load(), (unsigned long long)audioBlocksDropped.load() );
 
 	ArcadeStatus status = sdk.shutdown();
 	active = false;
@@ -772,6 +787,12 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 		init.PutMessageAlways( 10, video );
 	}
 	init.UInt32( 11, 1 );
+	{
+		Writer audio;	// AudioFormat: OpenAL's actual loopback output, stereo f32
+		audio.UInt32( 1, 44100 );
+		audio.UInt32( 2, 2 );
+		init.PutMessageAlways( 14, audio );
+	}
 
 	// action_map (map<string, string> = repeated { 1 key, 2 value }): what the default
 	// binds do (DarkmodKeybinds.cfg as shipped), keys by their W3C KeyboardEvent.code.
@@ -816,6 +837,7 @@ void CArcadeIntegration::Frame( bool insideMapLoad ) {
 		return;
 	}
 	inFrame = true;
+	captureGameTime = GameTimeS();
 
 	PollRequests( insideMapLoad );
 
@@ -2002,31 +2024,53 @@ void CArcadeIntegration::Observe() {
 // Frames out (render backend thread) and input in (main thread)
 // ===========================================================================
 
-void CArcadeIntegration::FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, void *user ) {
-	static_cast<CArcadeIntegration *>( user )->OnFrameCaptured( rgba, width, height, stride );
+uint64_t CArcadeIntegration::CaptureClockThunk( void *user ) {
+	return static_cast<CArcadeIntegration *>( user )->sdk.time_ns();
 }
 
-void CArcadeIntegration::OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride ) {
+void CArcadeIntegration::AudioCaptureThunk( const float *samples, uint32_t frames, uint64_t firstSampleNs, bool discontinuity, void *user ) {
+	auto &self = *static_cast<CArcadeIntegration *>( user );
+	ArcadeAudio audio = {};
+	audio.samples = samples;
+	audio.frame_count = frames;
+	audio.format = ARCADE_SAMPLE_FORMAT_F32;
+	audio.flags = discontinuity || self.audioDiscontinuity ? ARCADE_AUDIO_DISCONTINUITY : 0;
+	const ArcadeStatus status = self.sdk.submit_audio_at( 0, &audio, firstSampleNs );
+	self.audioDiscontinuity = status != ARCADE_STATUS_OK;
+	if ( self.audioDiscontinuity ) {
+		++self.audioBlocksDropped;
+	} else {
+		++self.audioBlocksSubmitted;
+	}
+	// No logging, allocation or retry in the sound interrupt. A rejected block
+	// is a real gap and marks the next accepted block as discontinuous.
+}
+
+void CArcadeIntegration::FrameCaptureThunk( const unsigned char *rgba, int width, int height, int stride, uint64_t observedNs, void *user ) {
+	static_cast<CArcadeIntegration *>( user )->OnFrameCaptured( rgba, width, height, stride, observedNs );
+}
+
+void CArcadeIntegration::OnFrameCaptured( const unsigned char *rgba, int width, int height, int stride, uint64_t observedNs ) {
 	// Runs on the render backend thread, right before the buffers are swapped.
 	std::lock_guard<std::mutex> lock( captureMutex );
-	if ( !capturing || !active || !sdk.submit_frame ) {
+	if ( !capturing || !sdk.submit_frame_at ) {
 		return;
 	}
 	ArcadeFrame frame;
 	memset( &frame, 0, sizeof( frame ) );
 	frame.frame_index = framesSubmitted.load() + 1;
-	frame.game_time_s = GameTimeS();
+	frame.game_time_s = captureGameTime.load();
 	frame.pixels = rgba;
 	frame.width = width;
 	frame.height = height;
 	frame.stride = stride;
 	frame.format = ARCADE_PIXEL_FORMAT_RGBA8;
 	frame.flags = ARCADE_FRAME_FLIP_Y;	// glReadPixels rows are bottom-up
-	ArcadeStatus status = sdk.submit_frame( 0, &frame );
+	ArcadeStatus status = sdk.submit_frame_at( 0, &frame, observedNs );
 	if ( status == ARCADE_STATUS_OK ) {
 		framesSubmitted = frame.frame_index;
-	} else if ( inputWarnings++ < 5 ) {
-		common->Warning( "Arcade SDK: arcade_submit_frame failed (%d): %s", (int)status, sdk.last_error() );
+	} else if ( frameWarnings++ < 5 ) {
+		common->Warning( "Arcade SDK: arcade_submit_frame_at failed (%d): %s", (int)status, sdk.last_error() );
 	}
 
 	if ( !dumpFramePath.empty() ) {

@@ -28,6 +28,41 @@ one zip, and use the `arcade-sdk` from that zip too.
 
 ## Unreleased
 
+- **Timestamped sound and video.** Declare optional `InitRequest.audio`
+  (8000..192000 Hz, mono/stereo), submit F32/S16 PCM through
+  `arcade_submit_audio_at(instance, &audio, first_sample_ns)`, and submit
+  frames with their original capture timestamp through `arcade_submit_frame_at`.
+  Map the engine's DSP/render clocks to the shared `arcade_time_ns()` clock;
+  preserve times across mixer buffering, GPU readback and worker queues.
+  `ARCADE_AUDIO_DISCONTINUITY` marks resets/loss, and omitted silence remains
+  a real gap. Older calls remain approximate: untimed audio counts samples
+  after its first arrival. Send zeros through silence or set the discontinuity
+  flag on resumed PCM, and keep that flag set after any non-OK status until
+  the next accepted submission. The structs, wire messages and ABI version
+  are unchanged.
+- **Bounded audio ingress.** Audio submission copies into a preallocated SPSC ring
+  without allocating, logging, network I/O or waiting on a lock. Full/busy
+  ingress rejects the whole buffer with `QUEUE_FULL`; keep advancing source
+  time and do not retry inside the callback. Calls are limited to both
+  `ARCADE_MAX_AUDIO_FRAMES` and 100 ms (`ARCADE_MAX_AUDIO_MS`), with larger
+  buffers split by the adapter. Draining never holds a lock shared with
+  the producer, preventing drain-induced empty-queue callback loss. SDK
+  lifecycle lookup can still reject on its nonwaiting try-lock. Stop/join
+  callbacks before shutdown.
+- **Policy conversion and recordings.** Filtering now scales with the
+  input/output ratio, retaining stopband rejection for 96/192 kHz input.
+  A bounded cache of normalized rational-phase taps reduces per-sample work
+  at common mixer rates while preserving the interpolation fallback.
+  The documented passband extends to 80% of the lower Nyquist rate; equal
+  rates bypass filtering. Policy packets are at most 10 ms, stale backlog
+  expires after 200 ms even during silence, and discontinuities retain source
+  timestamps. A 50 ms source-time lateness deadline delivers held short cues
+  on open streams; invalid or far-future packets cannot poison the timeline.
+  Recordings align PCM to video source intervals with one shared playout
+  delay, preserving silence and discarding stale packets after stalls or
+  episode cuts. `describe` and the debug app's Sound button also expose the
+  submitted audio. Without `InitRequest.audio`, the agent remains silent.
+
 - **Rank a benchmark for your build.** A new optional field,
   `InitRequest.benchmark`, lists runs of your challenges — a challenge and
   values for some of its variations — ranked by how much each tells about the
@@ -37,8 +72,10 @@ one zip, and use the `arcade-sdk` from that zip too.
   own; "Rank a benchmark" in the guide shows how. `arcade_init` checks every
   case (a declared challenge, declared variations, values in range, no two
   cases alike); `arcade-sdk describe` prints the ranking and the debug app
-  lists it with a Start per case. Without it nothing changes: a run plays
-  each challenge once at its defaults.
+  lists it with a Start per case. Build verification plays all of it — every
+  case, and each challenge it leaves out once at its defaults — and every case
+  must start and report an outcome. Without a benchmark nothing changes: runs
+  and verification play each challenge once at its defaults.
 
 - **32-bit Windows games are supported.** A new zip,
   `arcade_sdk-windows-x86-<version>.zip`, carries a 32-bit `arcade_sdk.dll`,

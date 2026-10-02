@@ -19,6 +19,45 @@ machines (`arcade-windows.toml`).
 
 `out/`, `tools/`, `arcade-registration*.json` and the SDK libraries are not committed.
 
+## Synchronized media
+
+This adapter depends on [SDK PR 4128](https://github.com/get-wrecked/ai-research/pull/4128),
+pinned in `fetch_sdk.sh` to `fc970a05a52fb4abec49122e42928c574da6e2e0`.
+ABI 2 is unchanged, but the three timestamp entry points are required; an older
+library fails symbol loading with a clear error. Ship the corresponding SDK
+library, header, protos, and CLI together.
+
+With `+set arcade_enable 1`, the engine opens an OpenAL Soft loopback device and
+registers its actual output: **44,100 Hz, stereo, normalized float PCM**. This
+captures OpenAL's final spatialized/effected mix. Arcade mode sends this mix to
+the SDK instead of a local speaker device; listen through the SDK debug app.
+Normal player mode continues to use the original output device. Sound must be
+enabled and `com_asyncSound` must be 1 or 3; unsupported loopback/startup fails
+explicitly instead of advertising an audio stream that cannot produce samples.
+
+Audio and video use `arcade_time_ns()`. Video records its observation before
+the downscale/readback. The sound interrupt renders the elapsed sample interval
+with the previously applied OpenAL state, then applies current game commands for
+the next interval. Sample timestamps use cumulative integer sample positions,
+so fractional callback lengths cannot accumulate drift. SDK submissions are at
+most 10 ms and do not allocate, log, resample, or wait for a consumer. The engine
+still performs its existing sound-world updates at approximately 60 Hz; this is
+the precision of command onset, not sample-accurate game-event scheduling.
+
+Catch-up is limited to 50 ms, below the streaming sources' queued buffer duration.
+A longer stall omits that source interval and marks a discontinuity rather than
+performing unbounded rendering. Existing OpenAL source positions resume after
+the hole; this is not a seek to where uninterrupted playback would have been.
+Rejected SDK submissions also mark the next accepted block discontinuous.
+Muted intervals contain silence. Shutdown removes both hooks and waits for any
+in-flight callbacks before shutting down/unloading the SDK.
+
+The standalone `arcade/tests/audio_capture_clock.cpp` regression exercises
+100,000 variable callbacks, exact fractional accounting, stalls, and restart;
+the `Arcade media clock` workflow runs it with address/undefined-behavior
+sanitizers. A native engine build and game recordings are still required to
+validate OpenAL audibility and actual A/V cue timing.
+
 ## Release flow: Linux
 
 ```bash

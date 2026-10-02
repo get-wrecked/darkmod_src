@@ -6,7 +6,7 @@ in the SDK zip as `README.md`, next to:
 | File | What it is |
 |---|---|
 | `arcade_sdk.dll`, `arcade_sdk.lib` (Windows) / `libarcade_sdk.so` (Linux) | The SDK. Link the import library or `LoadLibrary` the DLL; link or `dlopen` the shared object. |
-| `include/arcade_sdk.h` | The C ABI: fifteen functions, one status enum, the `ArcadeFrame` struct. |
+| `include/arcade_sdk.h` | The C ABI: sixteen functions, one status enum, the `ArcadeFrame` and `ArcadeAudio` structs. |
 | `proto/arcade_sdk.proto` | The messages you exchange with the SDK, and the one service you implement. |
 | `proto/arcade_common.proto` | Vectors, quaternions, transforms, colours — use these in your own `.proto`. |
 | `arcade-sdk.exe` / `arcade-sdk` | The command line: `arcade-sdk debug` is the debug app, a local web page to drive your integration while you build it; the other commands submit your builds (§8). |
@@ -48,13 +48,17 @@ through the SDK, not the screen and the OS:
 - **Frames**: every frame, your game hands the SDK the image the agent should
   see (`arcade_submit_frame`) — typically a small render target of its own,
   640×360 is plenty — with a frame index.
+- **Sound** (optional): your game hands the SDK what the agent should hear
+  (`arcade_submit_audio_at`) — timestamped mixer output, a buffer at a time, from
+  your audio thread.
 - **Input**: every frame, your game asks the SDK what the agent did
   (`arcade_poll_input`): which keys and mouse buttons are held, how far the
   mouse and wheel moved, and the ordered key/button/mouse events that got
   there. Feed it to your input code the way you feed the OS's.
 - **Instances**: one process of your game can host several independent
   copies of the world (`arcade_instance_count()`, one by default), each with
-  its own frames, input and challenges — so one machine runs several agents.
+  its own frames, sound, input and challenges — so one machine runs several
+  agents.
 
 What you add on top of that is structure:
 
@@ -74,7 +78,8 @@ The SDK is one DLL. Inside your process it does two things: it gives you a
 small C API, and it serves a local network endpoint that our tooling (and the
 debug app) connects to. It never calls into your code: you poll it. Everything
 about one world — its frames, its input, its challenges, its reports and
-metrics — names the instance it is about, `0..arcade_instance_count()`.
+metrics, its sound — names the instance it is about,
+`0..arcade_instance_count()`.
 
 ## 2. Checklist
 
@@ -87,8 +92,9 @@ What we need from you, in the end:
 4. A way to launch straight into a state where a challenge can start: an
    executable plus arguments, no launcher, no login, no menu to click through,
    no modal dialogs.
-5. Your frame size, and how many instances one process can host (`InitRequest.max_instances`; 1 is fine to
-   start with).
+5. Your frame size, your sound's format if it makes any (`InitRequest.audio`),
+   and how many instances one process can host (`InitRequest.max_instances`;
+   1 is fine to start with).
 6. Your action map: what each key and mouse input does in your game
    (`InitRequest.action_map`, section 5).
 7. No input from the agent takes it out of the game: no pause or main menu,
@@ -169,9 +175,10 @@ benchmark {
 
 `arcade_init` refuses a case that names an unknown challenge or variation, a
 value out of range, or two cases that resolve to the same values (each would
-measure the same thing twice), and more than 1024 cases. `arcade-sdk
-describe` prints the ranking, and the debug app's Challenges page lists it
-with a Start per case. The benchmark is optional: without one we play each
+measure the same thing twice), and more than 1024 cases. Build verification
+("Step 4: wait for the verdict" in section 8) plays every case, so each one
+has to work. `arcade-sdk describe` prints the ranking, and the debug app's
+Challenges page lists it with a Start per case. The benchmark is optional: without one we play each
 challenge once at its defaults, in the order you declared them.
 
 ## 4. Write `vendor.proto`
@@ -242,8 +249,9 @@ Rules:
 
 ## 5. Integrate the DLL
 
-Everything is serialized protobuf in and out — except a frame's pixels, which
-you hand over as they are — and you own every buffer. The sequence in one
+Everything is serialized protobuf in and out — except a frame's pixels and
+your sound's samples, which you hand over as they are — and you own every
+buffer. The sequence in one
 game session:
 
 ```c
@@ -278,7 +286,8 @@ for (uint32_t i = 0; i < n_worlds; i++) {
     // What the agent sees: this frame's image of world i.
     ArcadeFrame f = { .frame_index = frame, .game_time_s = now(), .pixels = worlds[i].rgba,
                       .width = 640, .height = 360, .format = ARCADE_PIXEL_FORMAT_RGBA8 };
-    arcade_submit_frame(i, &f);
+    // Store this timestamp with the render command, before GPU readback.
+    arcade_submit_frame_at(i, &f, worlds[i].capture_unix_ns);
 }
 for (uint32_t i = 0; i < n_worlds; i++) {
     // What the agent did: its input for world i since the last frame. Returns at once.
@@ -291,11 +300,18 @@ for (uint32_t i = 0; i < n_worlds; i++) {
 simulate_one_frame(worlds, n_worlds);
 frame++;
 
+// Every mixer buffer, on one audio producer thread per instance. See Sound
+// below for mapping the DSP sample clock to the shared arcade_time_ns clock.
+ArcadeAudio a = { .samples = mix, .frame_count = n_frames, .format = ARCADE_SAMPLE_FORMAT_F32 };
+ArcadeStatus status = arcade_submit_audio_at(i, &a, first_sample_unix_ns);
+// On QUEUE_FULL, drop this buffer and keep advancing the source sample clock.
+// Record status for the game thread; do not retry or log from the audio callback.
+
 // Whenever something happens — any thread.
 arcade_report(i, encode(Report{ .game_time_s = now(), .event = encode(GameEvent{ .item_picked_up = {...} }) }));
 arcade_report(i, encode(Report{ .game_time_s = now(), .challenge_completed = { .challenge_id = id, .outcome = OUTCOME_SUCCESS, .score = 1.0 } }));
 
-// Shutdown — before your process exits or unloads the DLL.
+// Stop and join audio/render callbacks before shutdown or unloading the DLL.
 arcade_shutdown();
 ```
 
@@ -306,14 +322,15 @@ arcade_shutdown();
 | Rule | Why |
 |---|---|
 | Call `arcade_poll_request` **once per frame on the game thread**, draining until it returns 0 bytes. | The poll (and `arcade_poll_input`) is the SDK's liveness signal; a frame without one reads as a hang. Your RPC handlers then run on your thread, so game state is safe to touch. `RpcRequest.instance` says which world a request is for. |
-| Every frame, for **every instance**: `arcade_submit_frame(i, N)`, then `arcade_poll_input(i, N, …)`, then simulate. | The frame is what the agent sees at frame N; the input is what it did since, applied before the next frame. An instance that stops submitting frames reads as stalled. Neither call blocks. |
-| Submit frames at **the size you declared** (`InitRequest.video`), in `RGBA8`, `BGRA8` or `RGB8`, any row stride, either way up. | The SDK converts them; anything else is `ARCADE_STATUS_VALIDATION_ERROR`. It copies the pixels before returning (about 0.3 ms at 640×360) and never blocks. |
+| Every frame, for **every instance**: submit its completed image with `arcade_submit_frame_at`, poll its input, then simulate. | Preserve the image's frame index and capture timestamp across asynchronous readback. An instance that stops submitting frames reads as stalled. The SDK never waits for network I/O, but frame conversion and bookkeeping run on the caller. |
+| Submit frames at **the size you declared** (`InitRequest.video`), in `RGBA8`, `BGRA8` or `RGB8`, any row stride, either way up. | The SDK copies/converts pixels before returning. Downscale on the GPU before readback and use a worker if CPU conversion would interrupt rendering. |
+| If you declared `InitRequest.audio`, submit each buffer in order with `arcade_submit_audio_at` and its **first sample's source timestamp**. Use one producer per instance. | Audio ingress copies into preallocated storage without allocation, logging, network I/O or waiting for a lock. `QUEUE_FULL` rejects the entire buffer: continue the source clock, do not retry inside the mixer callback. |
 | Answer **every** request with `arcade_respond` (the method's response message) or `arcade_fail` (a message). | An unanswered request times out for the caller after `timeout_ms` (30 s by default) and blocks nothing else, but reads as a bug. |
 | The response must be **that method's** response type. | The SDK checks it decodes; a wrong type fails the request for its caller with `ARCADE_STATUS_VALIDATION_ERROR`. |
-| `arcade_report`, `arcade_push_f32_metric`, `arcade_log` are safe from **any thread**. Reports and metrics name their instance; `arcade_log` (and `arcade_report` with `ARCADE_NO_INSTANCE`) is about the whole process. | They are a channel send. |
+| Reports, metrics and logs may be submitted from ordinary game/worker threads. | They may allocate or lock. The audio callback should only submit audio and record status in preallocated or atomic state; report it later on an ordinary thread. |
 | Resolve metric handles **once** at startup, not per frame. | `arcade_metric_handle` takes a lock; `arcade_push_f32_metric` does not. |
-| Every buffer is yours; the SDK never allocates for you and never keeps your pointer. | No `arcade_free`, no lifetime questions. |
-| `arcade_init` and `arcade_shutdown` must not overlap other SDK calls. | Everything else may run concurrently. |
+| Every buffer is yours; the SDK never retains your pointer after the call returns. | You can reuse a submitted buffer immediately. Audio ingress is preallocated; other SDK calls can allocate internally. |
+| `arcade_init` and `arcade_shutdown` must not overlap other SDK calls. Stop and join capture callbacks before shutdown. | The audio fast path borrows initialized process state; it cannot race teardown. |
 | Call `arcade_shutdown` from ordinary code before exit or `FreeLibrary` — **never** from `DllMain` or an `atexit` handler. | Windows holds the loader lock there, and the SDK's threads need it to exit: joining them from `DllMain` deadlocks. |
 | On `ARCADE_STATUS_SHUTDOWN_INCOMPLETE`, do **not** unload the DLL; retry later or just exit the process. | A thread still running inside an unmapped DLL crashes the process. |
 
@@ -330,7 +347,7 @@ arcade_shutdown();
 | `BUFFER_TOO_SMALL` | `arcade_poll_request` / `arcade_poll_input`: `*out_len` holds the size needed; nothing was taken. `ARCADE_MAX_REQUEST_BYTES` / `ARCADE_MAX_INPUT_BYTES` never hit this. |
 | `UNKNOWN_REQUEST` | No such pending request (already answered, timed out, or never issued). |
 | `UNKNOWN_METHOD` | A caller asked for a service/method your game does not serve. |
-| `QUEUE_FULL` | 256 requests are waiting to be polled: the game stopped polling. |
+| `QUEUE_FULL` | RPC queue full, or audio ingress full/busy. An audio call with this status accepted none of its samples; keep the source timeline advancing. |
 | `SHUTDOWN_INCOMPLETE` | See above. |
 | `PANIC` | A bug in the SDK. Send us `arcade_sdk.log`. |
 | `INTERNAL` | Anything else; `arcade_last_error()` says what (typically the port is in use). |
@@ -363,8 +380,11 @@ static class Arcade {
     [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_report(uint instance, byte[] report, nuint len);
     [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern uint arcade_metric_handle([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_push_f32_metric(uint instance, uint handle, float value, double gameTimeS);
-    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_submit_frame(uint instance, in ArcadeFrame frame);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern ulong arcade_time_ns();
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_submit_frame_at(uint instance, in ArcadeFrame frame, ulong captureUnixNs);
     [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_poll_input(uint instance, ulong frameIndex, byte[] buf, nuint cap, out nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_submit_audio_at(uint instance, in ArcadeAudio audio, ulong firstSampleUnixNs);
+    public const uint AudioDiscontinuity = 1;
     public static string LastError() => Marshal.PtrToStringUTF8(arcade_last_error()) ?? "";
 }
 
@@ -378,7 +398,22 @@ struct ArcadeFrame {
     public IntPtr Pixels;
     public uint Width, Height, Stride, Format, Flags, Reserved;
 }
+
+// 24 bytes (20 in a 32-bit build). `Samples` points at `FrameCount * channels`
+// interleaved floats (Format 1) or shorts (Format 2); pin them for the call.
+[StructLayout(LayoutKind.Sequential)]
+struct ArcadeAudio {
+    public IntPtr Samples;
+    public uint FrameCount, Format, Flags, Reserved;
+}
 ```
+
+In Unity, `OnAudioFilterRead(float[] data, int channels)` on the object with
+the `AudioListener` is a possible mix tap; verify that it includes every
+required bus. It runs on the audio thread: pin `data` for the call, set
+`FrameCount = data.Length / channels`, and preserve the DSP sample time.
+A native effect on the master AudioMixer bus is another option. Avoid managed
+allocations, Unity main-thread APIs and logging in the audio callback.
 
 ### The `InitRequest`
 
@@ -396,6 +431,7 @@ Fill it once, at startup:
 | `event_type` | `"acme.roguelike.v1.GameEvent"`, or empty if you report no events. |
 | `coordinate_system` | **Required.** Your world frame: `up` (`AXIS_POS_Y`, `AXIS_POS_Z`, …), `handedness` (`HANDEDNESS_LEFT` or `HANDEDNESS_RIGHT`) and `euler_order`, the order your Euler angles apply in (`EULER_ORDER_YAW_PITCH_ROLL`, …). See below. |
 | `video` | **Required.** The width and height of every frame you submit: even, 64..3840 × 64..2160. 640×360 is plenty for today's agents. |
+| `audio` | Optional. The format of the sound you submit: `sample_rate` (8000..192000) and `channels` (1 or 2) — your mixer's output format, 48000 Hz stereo most often. Leave it out if the agent should hear nothing. See [Sound](#sound). |
 | `max_instances` | The most instances one process can host (0 = 1, at most 64). |
 | `action_map` | What each input does in your game: `{"KeyW": "Move forward", "Space": "Jump", "MouseLeft": "Fire", "MouseMove": "Look around"}`. See [Input](#input). |
 | `benchmark` | Optional. Runs of your challenges, the most informative first; we play the top of the list. See [Rank a benchmark](#rank-a-benchmark). |
@@ -441,11 +477,112 @@ naming your pixels, its `frame_index` and your game clock.
   Unity) is bottom-up: set `flags = ARCADE_FRAME_FLIP_Y`.
 - **Frame index**: any strictly increasing number per instance — your frame
   counter will do.
-- Read back without stalling your GPU: a ring of two or three staging
-  buffers, submitting the one that finished.
+- Use a ring of staging/readback buffers. Record `arcade_time_ns()` when the
+  image's state is observed and retain it with the frame until readback is
+  complete; pass it to `arcade_submit_frame_at`. Timestamping completion
+  would hide the readback delay. Transport currently rounds this timestamp
+  down to milliseconds (less than 1 ms quantization error).
+- Capture the final tone-mapped RGB view and all UI/HUD the policy needs.
+  Copy/downscale an existing final image where possible; an extra scene
+  render can be expensive and may omit the HUD. The SDK accepts CPU pixels,
+  not a GPU texture handle.
 
 `arcade-sdk describe` writes the first frame it sees as `arcade-frame.png`:
 look at it.
+
+### Sound
+
+Declare `InitRequest.audio` and tap the complete mix for the instance. Submit
+interleaved float PCM (`ARCADE_SAMPLE_FORMAT_F32`, nominally −1..1) or signed
+16-bit PCM (`ARCADE_SAMPLE_FORMAT_S16`) at the registered rate and 1 or 2
+channels. Mix wider speaker layouts down to stereo. One call is limited to
+both `ARCADE_MAX_AUDIO_FRAMES` and `ARCADE_MAX_AUDIO_MS` (100 ms); split larger
+buffers and advance each piece's timestamp by its sample offset. Keep the
+actual mixer format fixed, or reinitialize after a device-format change.
+
+Use `arcade_submit_audio_at(instance, &audio, first_sample_unix_ns)`. One
+producer per instance submits in source order. The DLL copies samples into
+preallocated storage, splits accepted buffers into at most 10 ms packets,
+and handles conversion/fan-out on a worker. Ingress does not allocate, log,
+perform network I/O or wait for locks. `ARCADE_STATUS_QUEUE_FULL` means the
+**whole buffer was rejected**, including on lock contention. Advance the
+source sample clock anyway and report the dropped-buffer count later from
+a game/worker thread. Do not spin, retry, or log inside a mixer callback.
+
+**Use one source clock for both streams.** `arcade_time_ns()` gives a
+monotonic clock anchored to Unix time when the SDK starts; later wall-clock
+adjustments do not change it. It is initialized by `arcade_init`. Map the
+engine's DSP/sample clock to that domain, then derive each buffer's first
+sample time from its sample position. Keep the mapping across callbacks;
+do not replace timestamps with callback arrival or worker drain time. Use
+integer sample-count arithmetic (wide intermediates, or quotient/remainder)
+to avoid overflow and accumulated rounding drift.
+
+Choose what the common timeline represents. A logical engine observation
+clock relates rendered world state to the mixed samples for that state.
+Matching physical screen/speaker output additionally requires accounting
+for rendering/presentation and mixer/device buffering. A mixer callback may
+run ahead of playback, and GPU readback may finish several frames after the
+image was rendered. The timestamp API preserves this information; it does
+not automatically measure those engine offsets. The example hosts use a
+logical media clock without physical output devices.
+
+Silence can be sent as zero samples or omitted. When omitting it, advance
+the source sample clock across the silence: the next timestamp preserves
+the gap, including gaps shorter than 200 ms. Set
+`audio.flags = ARCADE_AUDIO_DISCONTINUITY` after a DSP reset, seek or known
+loss. For a clock reset, establish a new mapping at the actual new source
+time. Stop and join capture callbacks before `arcade_shutdown`.
+
+The older entrypoints remain approximate: `arcade_submit_frame` timestamps
+submission, while `arcade_submit_audio` anchors the first buffer at arrival
+and then advances by sample count to ignore callback jitter. For that
+untimed audio call, send zeros through silence or set
+`ARCADE_AUDIO_DISCONTINUITY` on resumed PCM to re-anchor at arrival. Also
+set the flag on the next accepted submission after **any non-OK status**,
+and retain it until a call succeeds. A failed call can occur before the SDK
+knows which instance lost audio. Timed callers preserve loss through their
+source timestamps. These legacy calls cannot recover engine buffering or
+asynchronous readback time; use both timed calls for accurate alignment.
+
+**Engine integration points:**
+
+| Engine | Video | Audio |
+|---|---|---|
+| UE5 | Final viewport/downscaled target through a persistent [`FRHIGPUTextureReadback`](https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/RHI/FRHIGPUTextureReadback) ring; retain the original frame timestamp. | Master [`ISubmixBufferListener`](https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Engine/ISubmixBufferListener); map its `AudioClock` and sample positions, including playback latency if that is the chosen timeline. |
+| Unity | [`AsyncGPUReadback`](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/Rendering.AsyncGPUReadback.html), reusable buffers and original observation timestamps; completion can be several frames later. | Full-mix DSP tap or native master-bus effect; map `AudioSettings.dspTime`, account for the DSP/output ring, and pin or use preallocated native PCM. |
+| Veloren | Extend the existing wgpu texture-to-buffer readback into a persistent ring; avoid creating a thread and buffers for every frame. | Current Voxygen uses Kira/CPAL: a main-track effect or backend tap can capture the finished mix. A CPAL backend exposes callback and predicted playback timestamps separately. |
+| The Dark Mod | Final OpenGL framebuffer, GPU downscale and asynchronous staging/PBO readback. | Normal output is mixed by OpenAL. An OpenAL Soft loopback device with `alcRenderSamplesSOFT`, or a backend output tap, captures that mix; the legacy software `finalMixBuffer` is not a replacement for it. A loopback adapter controls pacing and forwards PCM to speakers if required. |
+
+Tap before the player's master volume, and keep the required mixer buses
+active while unfocused or muted. Each instance needs its own world's mix.
+If the engine has one global listener/mix, host one instance per process
+unless the adapter explicitly isolates the buses. A number attached to a
+global mix does not separate worlds.
+
+The policy consumer resamples on the machine, using a stateful filter whose
+support scales with the rate ratio. Its specified passband is 0..80% of the
+lower Nyquist rate (up to 12.8 kHz for 32 kHz output); the remaining band is
+the transition to at least 60 dB stopband rejection in the tested rate
+conversions. Equal rates bypass filtering. Output packets are at most 10 ms;
+a slow consumer drops audio older than 200 ms on the live source clock,
+including after a pause with no subsequent packet, and marks the loss.
+Up to 250 ms of future mixer samples can also be queued without expiring
+current sound; packets ending further ahead are rejected.
+Recordings use source timestamps and a common 60 ms playout delay for both
+tracks, filling missing audio time with silence.
+
+Resampling needs a short lookahead: about 1 ms when downsampling to 32 kHz,
+up to 4 ms for 8 kHz input. A run's held tail is emitted at its next
+discontinuity or stream close, or 50 ms after its final sample's source
+time if no continuation has arrived. Even a cue shorter than the lookahead
+is delivered while the stream remains open. Continuation after this
+source-time deadline starts fresh filter history. Send zero PCM through
+silence to avoid this tail-delivery delay.
+
+`arcade-sdk describe` listens for two seconds and prints what it heard — how
+many buffers, how big, how loud — and warns when nothing came or the sound
+peaks at full scale (16-bit samples submitted as floats sound like that).
 
 ### Input
 
@@ -552,7 +689,8 @@ per-attempt `final_metrics`.
    exactly what the agent sees and sends: if you can play it here, the agent
    can too. Press every key, in and out of the situations where it does
    something, and check none takes you out of the game — Esc included, with
-   the **Send Esc** button (the Esc key itself only frees the mouse).
+   the **Send Esc** button (the Esc key itself only frees the mouse). If you
+   declared `InitRequest.audio`, **Sound** plays what the agent hears.
 4. **Challenges**: start each challenge with chosen variation values and watch
    the game do it; the resolved instruction comes back on the card.
 5. **Services**: call any of your RPCs from a form generated from your `.proto`,
@@ -713,12 +851,13 @@ It starts the server (and waits for its `ready_tcp_port`) if there is one,
 then the client with the SDK on a free loopback port and without the debug
 app, waits for `arcade_init` (up to `--timeout-s`, 300 s by default), reads
 the registration, checks the game has started polling and submitting frames
-(writing the first one as `arcade-frame.png` beside `arcade.toml`), and
-stops both.
+(writing the first one as `arcade-frame.png` beside `arcade.toml`), listens
+to its sound if it declares any, and stops both.
 `--instances N` runs it with N instances. It prints what it found — every
 challenge with its variations and defaults, your benchmark's ranking, every
 metric, your action map,
-your frame size and instances, your services and event kinds — and writes
+your frame size, sound format and instances, your services and event kinds —
+and writes
 `arcade-registration.json` beside `arcade.toml`. Read the printout: it is
 exactly what we will see and play. A wrong default, a missing challenge or a
 metric you forgot to declare shows up here, not after a run. It also refuses
@@ -758,10 +897,11 @@ registration included; the portal lists your builds too.
 
 Every build you submit is run once on arcade, on its own, to check that it
 works there: that it installs and launches, declares the challenges it
-registered at submit, and that every one of them starts and reports an outcome
-(any outcome: a `FAILURE` or `TIMEOUT` still shows the challenge works; what
-fails the check is a challenge that never reports). It usually takes a few
-hours.
+registered at submit, and that every case of your benchmark — and each
+challenge it leaves out, at its defaults — starts and reports an outcome (any
+outcome: a `FAILURE` or `TIMEOUT` still shows the case works; what fails the
+check is one that never reports). It usually takes a few hours; a long
+benchmark is spread over more machines.
 
 ```bash
 arcade-sdk builds status acme_shooter@1.4.0 --wait
@@ -801,7 +941,17 @@ looked.
 - **The frame is upside down**: set `ARCADE_FRAME_FLIP_Y` (GL readbacks are
   bottom-up). **Red and blue swapped**: it is `BGRA8`, not `RGBA8`.
 - **Pausing when unfocused**: don't. The agent's input comes through the SDK,
-  not the window; a game that pauses on focus loss stalls the attempt.
+  not the window; a game that pauses on focus loss stalls the attempt. The
+  same goes for muting when unfocused: keep submitting the mix.
+- **The sound is loud and distorted**: 16-bit samples submitted as
+  `ARCADE_SAMPLE_FORMAT_F32`, or the reverse. **It plays too fast or too
+  slow**: `InitRequest.audio.sample_rate` is not your mixer's rate.
+- **Audio and video are offset**: use both timed submission calls. Check
+  the DSP-to-media-clock mapping, mixer/device latency, and whether the
+  video timestamp was captured before asynchronous readback.
+- **Audio reports `QUEUE_FULL`**: the rejected buffer must stay dropped;
+  keep advancing sample time, record the count outside the callback, and
+  check capture/consumer load. Do not retry in a tight loop.
 - **An ABI 1 build**: builds from before frames and input went through the SDK
   are refused. Rebuild against this SDK, `describe` and submit a new build id.
 - **Modal dialogs**: any dialog that needs a click to dismiss (crash reporter,

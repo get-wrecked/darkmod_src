@@ -28,7 +28,7 @@ ArcadeSdkLoader::ArcadeSdkLoader() : handle( 0 ) {
 void ArcadeSdkLoader::ClearSymbols() {
 	abi_version = nullptr; version = nullptr; last_error = nullptr; init = nullptr; shutdown = nullptr;
 	instance_count = nullptr; poll_request = nullptr; respond = nullptr; fail = nullptr; report = nullptr;
-	metric_handle = nullptr; push_f32_metric = nullptr; submit_frame = nullptr; poll_input = nullptr; log = nullptr;
+	metric_handle = nullptr; push_f32_metric = nullptr; time_ns = nullptr; submit_frame_at = nullptr; submit_audio_at = nullptr; poll_input = nullptr; log = nullptr;
 }
 
 template<class F>
@@ -73,7 +73,9 @@ bool ArcadeSdkLoader::Load() {
 	ok &= BindSymbol( handle, "arcade_report", report, error );
 	ok &= BindSymbol( handle, "arcade_metric_handle", metric_handle, error );
 	ok &= BindSymbol( handle, "arcade_push_f32_metric", push_f32_metric, error );
-	ok &= BindSymbol( handle, "arcade_submit_frame", submit_frame, error );
+	ok &= BindSymbol( handle, "arcade_time_ns", time_ns, error );
+	ok &= BindSymbol( handle, "arcade_submit_frame_at", submit_frame_at, error );
+	ok &= BindSymbol( handle, "arcade_submit_audio_at", submit_audio_at, error );
 	ok &= BindSymbol( handle, "arcade_poll_input", poll_input, error );
 	ok &= BindSymbol( handle, "arcade_log", log, error );
 	if ( !ok ) {

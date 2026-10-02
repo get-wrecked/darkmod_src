@@ -19,6 +19,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 
 #include "snd_local.h"
+#include <algorithm>
+#include <chrono>
 
 idCVar idSoundSystemLocal::s_noSound( "s_noSound", "0", CVAR_SOUND | CVAR_BOOL | CVAR_NOCHEAT, "" );
 idCVar idSoundSystemLocal::s_diffractionMax( "s_diffractionMax", "10", CVAR_SOUND | CVAR_FLOAT | CVAR_ARCHIVE, "max vol loss (dB) at 180 degrees diffraction" ); // grayman #4219
@@ -333,6 +335,8 @@ void idSoundSystemLocal::Init() {
 //======== set up openal device and context ========
 
 	common->Printf("Setup OpenAL device and context\n");
+	renderCaptureSamples = nullptr;
+	captureTimeline.Reset();
 
 	const char *queriedDeviceName = s_device.GetString();
 	if (strlen(queriedDeviceName) < 1)
@@ -366,8 +370,29 @@ void idSoundSystemLocal::Init() {
 		}
 	}
 
-	openalDevice = alcOpenDevice(queriedDeviceName);
-	if (!openalDevice && queriedDeviceName) {
+	// Arcade is an application-driven renderer: the actual OpenAL final mix,
+	// including spatialization and EFX, is the SDK's audio source. It does not
+	// open a second device or try to tap finalMixBuffer (which contains no PCM
+	// in the OpenAL path). Normal player builds retain the hardware device.
+	const bool arcadeCapture = cvarSystem->GetCVarBool( "arcade_enable" );
+	if ( arcadeCapture ) {
+		auto openLoopback = reinterpret_cast<LPALCLOOPBACKOPENDEVICESOFT>( alcGetProcAddress( nullptr, "alcLoopbackOpenDeviceSOFT" ) );
+		auto supportsFormat = reinterpret_cast<LPALCISRENDERFORMATSUPPORTEDSOFT>( alcGetProcAddress( nullptr, "alcIsRenderFormatSupportedSOFT" ) );
+		renderCaptureSamples = reinterpret_cast<LPALCRENDERSAMPLESSOFT>( alcGetProcAddress( nullptr, "alcRenderSamplesSOFT" ) );
+		if ( !alcIsExtensionPresent( nullptr, "ALC_SOFT_loopback" ) || !openLoopback || !supportsFormat || !renderCaptureSamples ) {
+			common->FatalError( "Arcade audio requires OpenAL Soft ALC_SOFT_loopback" );
+			return;
+		}
+		openalDevice = openLoopback( nullptr );
+		if ( !openalDevice || !supportsFormat( openalDevice, AudioCaptureClock::Rate, ALC_STEREO_SOFT, ALC_FLOAT_SOFT ) ) {
+			common->FatalError( "Arcade audio requires OpenAL loopback 44100 Hz stereo float" );
+			return;
+		}
+		common->Printf( "OpenAL: Arcade loopback final mix, 44100 Hz stereo float\n" );
+	} else {
+		openalDevice = alcOpenDevice(queriedDeviceName);
+	}
+	if (!openalDevice && queriedDeviceName && !arcadeCapture) {
 		common->Printf("OpenAL: failed to open device '%s' (0x%x), using default\n", queriedDeviceName, alGetError());
 		openalDevice = alcOpenDevice(NULL);
 	}
@@ -381,6 +406,11 @@ void idSoundSystemLocal::Init() {
 	}
 
 	idList<ALCint> attribs;
+	if ( arcadeCapture ) {
+		attribs.Append( ALC_FORMAT_CHANNELS_SOFT ); attribs.Append( ALC_STEREO_SOFT );
+		attribs.Append( ALC_FORMAT_TYPE_SOFT ); attribs.Append( ALC_FLOAT_SOFT );
+		attribs.Append( ALC_FREQUENCY ); attribs.Append( AudioCaptureClock::Rate );
+	}
 
 	if (alcIsExtensionPresent(openalDevice, "ALC_SOFT_HRTF")) {
 		HRTFAvailable = true;
@@ -531,6 +561,7 @@ idSoundSystemLocal::Shutdown
 ===============
 */
 void idSoundSystemLocal::Shutdown() {
+	SetCaptureHook( nullptr, nullptr, nullptr );
 	ShutdownHW();
 
 	// EFX or not, the list needs to be cleared
@@ -678,6 +709,9 @@ int idSoundSystemLocal::AsyncUpdate( int inTime ) {
 	if ( !isInitialized || shutdown ) {
 		return 0;
 	}
+	if ( renderCaptureSamples ) {
+		return CaptureLoopback( inTime );
+	}
 
 	dword dwCurrentWritePos;
 	dword dwCurrentBlock;
@@ -757,6 +791,9 @@ int idSoundSystemLocal::AsyncUpdateWrite( int inTime ) {
 	if ( !isInitialized || shutdown ) {
 		return 0;
 	}
+	if ( renderCaptureSamples ) {
+		return CaptureLoopback( inTime );
+	}
 
 	unsigned int dwCurrentBlock = (unsigned int)( inTime * 44.1f / MIXBUFFER_SAMPLES );
 
@@ -790,6 +827,56 @@ int idSoundSystemLocal::AsyncUpdateWrite( int inTime ) {
 	nextWriteBlock = dwCurrentBlock + 1;
 	CurrentSoundTime = sampleTime;
 
+	return Sys_Milliseconds() - inTime;
+}
+
+bool idSoundSystemLocal::IsCaptureAvailable() const {
+	return renderCaptureSamples && openalContext && isInitialized && !s_noSound.GetBool();
+}
+
+void idSoundSystemLocal::SetCaptureHook( soundCaptureClock_t clock, soundCaptureCallback_t callback, void *user ) {
+	std::lock_guard<std::mutex> lock( captureHookMutex );
+	captureClock = clock;
+	captureCallback = callback;
+	captureUser = user;
+	captureTimeline.Reset();
+}
+
+int idSoundSystemLocal::CaptureLoopback( int inTime ) {
+	// Only registration/teardown takes this lock from another thread. The
+	// consumer copies into its bounded queue without waiting on network/video.
+	std::lock_guard<std::mutex> lock( captureHookMutex );
+	const uint64_t now = captureClock ? captureClock( captureUser ) :
+		static_cast<uint64_t>( std::chrono::duration_cast<std::chrono::nanoseconds>( std::chrono::steady_clock::now().time_since_epoch() ).count() );
+	uint32_t remaining = captureTimeline.Due( now );
+	// Render the elapsed interval with the state applied at its start. Applying
+	// today's game commands first would backdate a new sound into old PCM.
+	// The 50 ms backlog cap fits the engine's queued streaming-source buffers.
+	while ( remaining ) {
+		const uint32_t count = std::min( remaining, AudioCaptureClock::BlockFrames );
+		renderCaptureSamples( openalDevice, captureSamples, count );
+		if ( captureSilent ) {
+			memset( captureSamples, 0, count * 2 * sizeof( float ) );
+		}
+		if ( captureCallback ) {
+			captureCallback( captureSamples, count, captureTimeline.Time(), captureTimeline.Discontinuity(), captureUser );
+		}
+		captureTimeline.Consume( count );
+		remaining -= count;
+	}
+	// Preserve the engine's 44.1 kHz sound-world clock and normal async cadence.
+	// Commands applied now first affect the next source interval, exactly as
+	// they would on an independently running OpenAL hardware device.
+	const int sampleTime = static_cast<int>( static_cast<uint64_t>( static_cast<uint32_t>( inTime ) ) * 441 / 10 );
+	captureSilent = muted || !currentSoundWorld || currentSoundWorld->fpa[0];
+	alcSuspendContext( openalContext );
+	if ( !captureSilent ) {
+		currentSoundWorld->MixLoop( sampleTime, 2, finalMixBuffer );
+	} else {
+		alListenerf( AL_GAIN, 0.0f );
+	}
+	alcProcessContext( openalContext );
+	CurrentSoundTime = sampleTime;
 	return Sys_Milliseconds() - inTime;
 }
 
