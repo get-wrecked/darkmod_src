@@ -11,7 +11,7 @@ game_id = "thedarkmod"
 # stage_build.sh writes the same id into run_arcade.cmd (+set arcade_buildId).
 build_id = "2.15-arcade-20260930-693d138-win"
 # Recorded on the submission: what changed, what to look at.
-notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, Windows x64 under Proton, SDK 2.2.0 (ABI 2): 640x360 frames submitted from the render backend, agent input injected through the engine input paths (not the OS), action map from the stock binds, real-time, 1 instance. Challenges on A New Job and Tears of St. Lucia: complete-mission, per-mission objective and reach, steal-loot, knockout, explore."
+notes = "The Dark Mod 2.15 (svn r693d138 trunk) + arcade SDK integration, Windows x64 under Proton, SDK 2.2.1+bf5f6c81 (ABI 2): 640x360 frames submitted from the render backend, agent input injected through the engine input paths (not the OS), action map from the stock binds, real-time, 1 instance. Agent input is gameplay only (menu, console, save/load keys are dropped). Challenges on A New Job and Tears of St. Lucia: complete-mission (stealth/kill rules), per-mission objective, reach (start tiers), item, unlock, steal-loot, knockout, pickpocket, stay-hidden, explore; InitRequest.benchmark ranks 48 cases."
 
 # The game the agent plays. It embeds the arcade SDK library (arcade_sdk.dll).
 [client]

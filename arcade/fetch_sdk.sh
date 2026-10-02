@@ -10,11 +10,15 @@
 # if the InitRequest contract changed) in the same commit.
 #
 # Usage:  ./fetch_sdk.sh [linux] [windows]     (default: both)
-# Needs the GitHub CLI (gh) signed in to an account that may read the repository.
+#   SDK_VERSION=x.y.z   a GitHub release (needs the GitHub CLI, gh, signed in to an account that may read the repository)
+#   SDK_SHA=<commit>    instead: a per-commit build from the SDK bucket,
+#                       gs://gi-prod-games-cluster-app/arcade_sdk[-windows]-<sha>.zip (needs gsutil with read access)
 set -eu
 
-SDK_VERSION=${SDK_VERSION:-2.2.0}
+SDK_VERSION=${SDK_VERSION:-2.2.1}
+SDK_SHA=${SDK_SHA:-bf5f6c81d0385db35bbbda987d842a38d72f5d4b}
 SDK_REPO=${SDK_REPO:-get-wrecked/ai-research}
+SDK_BUCKET=${SDK_BUCKET:-gs://gi-prod-games-cluster-app}
 PLATFORMS=${*:-linux windows}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -24,9 +28,15 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$HERE/tools"
 
 for p in $PLATFORMS; do
-	zip="arcade_sdk-$p-$SDK_VERSION.zip"
-	echo "fetching $zip from $SDK_REPO (arcade-sdk-v$SDK_VERSION)"
-	gh release download "arcade-sdk-v$SDK_VERSION" -R "$SDK_REPO" -p "$zip" -D "$TMP" --clobber
+	if [ -n "$SDK_SHA" ]; then
+		case "$p" in linux) zip="arcade_sdk-$SDK_SHA.zip" ;; *) zip="arcade_sdk-$p-$SDK_SHA.zip" ;; esac
+		echo "fetching $zip from $SDK_BUCKET"
+		gsutil -q cp "$SDK_BUCKET/$zip" "$TMP/$zip"
+	else
+		zip="arcade_sdk-$p-$SDK_VERSION.zip"
+		echo "fetching $zip from $SDK_REPO (arcade-sdk-v$SDK_VERSION)"
+		gh release download "arcade-sdk-v$SDK_VERSION" -R "$SDK_REPO" -p "$zip" -D "$TMP" --clobber
+	fi
 	rm -rf "$TMP/$p" && unzip -q "$TMP/$zip" -d "$TMP/$p"
 	case "$p" in
 	linux)

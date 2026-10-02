@@ -22,6 +22,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "../ai/AI.h"
 #include "../ai/Memory.h"
 #include "../Inventory/Inventory.h"
+#include "../BinaryFrobMover.h"
+#include "../FrobLock.h"
 #include "../Missions/MissionManager.h"
 #include "../Objectives/MissionData.h"
 #include "../Objectives/Objective.h"
@@ -121,7 +123,8 @@ static const struct { const char *input; const char *action; } ACTION_MAP[] = {
 	{ "KeyV", "Show the compass" },
 	{ "KeyO", "Show the objectives" },
 	{ "Delete", "Look down" }, { "PageDown", "Look up" }, { "End", "Center the view" },
-	{ "Escape", "Open / close the menu" },
+	// Not listed, and ignored when the agent sends them (IsGameplayKey): Escape (menu),
+	// F5/F9 (quick save/load), F12 (screenshot), Pause, Y (chat), the console key.
 };
 static const int NUM_ACTIONS = sizeof( ACTION_MAP ) / sizeof( ACTION_MAP[0] );
 // Input.events oneof / InputEvent members (arcade_sdk.proto)
@@ -159,6 +162,7 @@ static const CArcadeIntegration::LocationSpec LOCATIONS[] = {
 	{ "newjob", "inn", "the common room of Canonbury Tavern" },
 	{ "newjob", "kitchen", "the tavern kitchen" },
 	{ "newjob", "kitchen_up", "the loft above the tavern kitchen" },
+	{ "newjob", "room_3", "an upstairs guest room of the tavern" },
 	{ "newjob", "room_down", "the tavern's downstairs back room" },
 	{ "stlucia", "main_road", "the main road outside" },
 	{ "stlucia", "church_yard", "the church yard" },
@@ -177,16 +181,67 @@ static const CArcadeIntegration::LocationSpec LOCATIONS[] = {
 };
 static const int NUM_LOCATIONS = sizeof( LOCATIONS ) / sizeof( LOCATIONS[0] );
 
+static const CArcadeIntegration::ItemSpec ITEMS[] = {
+	{ "newjob", "cash-box-key", "cash box key", "the cash box key", "it lies in the tavern's downstairs back room, behind the common room" },
+	{ "stlucia", "church-entrance-key", "Church entrance key", "the church entrance key", "carried by one of the guards patrolling outside the church; pickpocket him from behind, or knock him out and search" },
+	{ "stlucia", "vestibule-key", "Vestibule key", "the vestibule key", "carried by a guard inside the church" },
+	{ "stlucia", "walkway-key", "Walkway key", "a walkway key", "one is carried by the guard outside, another lies on the upper walkway of the church" },
+	{ "stlucia", "guards-room-key", "Guard's room key", "the guards' room key", "carried by a guard patrolling the church" },
+	{ "stlucia", "priests-key", "Priest's key", "the priest's key", "carried by Father Brenard, the priest" },
+	{ "stlucia", "spare-priest-key", "spare key to priest's room", "the spare key to the priest's room", "it lies somewhere in the priest's quarters at the back of the church" },
+	{ "stlucia", "padlock-key", "Padlock Key", "the sewer padlock key", "hidden near the sewer entrance on the street; a decoy copy lies on a ledge nearby" },
+	{ "stlucia", "priest-journal", "Father Brenard's journal", "Father Brenard's journal", "an open book in the priest's quarters; pick it up to read it" },
+	{ "stlucia", "relic", "The Relic", "the relic", "in an ornate chest in the crypt below the church; the chest is locked" },
+};
+static const int NUM_ITEMS = sizeof( ITEMS ) / sizeof( ITEMS[0] );
+
+static const CArcadeIntegration::DoorSpec DOORS[] = {
+	{ "newjob", "cash-box", "JewelleryBoxBody_1", "the innkeeper's cash box", "in the tavern kitchen; the cash box key is in the downstairs back room, or pick the lock" },
+	{ "newjob", "footlocker", "FootLockerBody_6", "Lord Rothwick's footlocker", "in his room upstairs; he carries its key, or pick the lock" },
+	{ "stlucia", "front-door", "ChurchFrontDoorL1", "the church's front door", "the guard outside carries the church entrance key" },
+	{ "stlucia", "vestibule-door", "atdm_mover_door_4", "the vestibule door inside the church", "a guard inside carries the vestibule key, or pick the lock" },
+	{ "stlucia", "walkway-door", "atdm_mover_door_1", "the door to the upper walkway", "opened with a walkway key, or pick the lock" },
+	{ "stlucia", "guards-room", "atdm_mover_door_32", "the guards' room door", "a guard carries its key, or pick the lock" },
+	{ "stlucia", "priests-room", "atdm_mover_door_34", "the priest's room door", "the priest carries the key; a spare lies in his quarters" },
+	{ "stlucia", "relic-chest", "RelicChestLid", "the relic chest in the crypt", "no key exists: pick its lock" },
+	{ "stlucia", "sewer-padlock", "PadlockHasp", "the padlock on the sewer grate", "its key is hidden nearby on the street" },
+	{ "stlucia", "footlocker", "FootLockerBody_3", "the footlocker in the guards' room", "pick the lock" },
+};
+static const int NUM_DOORS = sizeof( DOORS ) / sizeof( DOORS[0] );
+
+// Where the player is put when a challenge's "start" is not the mission start. The
+// tiers are shared across missions so the same variation value means the same kind
+// of place everywhere: outside the target building, at its entrance, inside among the
+// patrols, deep in the most guarded part.
+static const CArcadeIntegration::StartSpec STARTS[] = {
+	{ "newjob", "outside", "generic_streets" },
+	{ "newjob", "entrance", "inn" },
+	{ "newjob", "inside", "room_3" },
+	{ "newjob", "deep", "room_down" },
+	{ "stlucia", "outside", "main_road" },
+	{ "stlucia", "entrance", "church_yard" },
+	{ "stlucia", "inside", "church_interior" },
+	{ "stlucia", "deep", "basement_main" },
+};
+static const int NUM_STARTS = sizeof( STARTS ) / sizeof( STARTS[0] );
+static const char *START_MISSION = "mission-start";
+static const char *START_TIERS[] = { "mission-start", "outside", "entrance", "inside", "deep" };
+
 static const char *DIFFICULTY_NAMES[] = { "easy", "medium", "hard" };
 static const char *STEALTH_NAMES[] = { "any", "unseen", "ghost" };
+static const char *KILLS_NAMES[] = { "allowed", "forbidden" };
 
 // Challenge ids
 static const char *CH_COMPLETE_MISSION = "complete-mission";
 static const char *CH_STEAL_LOOT = "steal-loot";
 static const char *CH_KNOCKOUT = "knockout";
 static const char *CH_EXPLORE = "explore";
+static const char *CH_PICKPOCKET = "pickpocket";
+static const char *CH_STAY_HIDDEN = "stay-hidden";
 static const char *CH_OBJECTIVE_SUFFIX = "-objective";	// newjob-objective, stlucia-objective
 static const char *CH_REACH_SUFFIX = "-reach";			// newjob-reach, stlucia-reach
+static const char *CH_ITEM_SUFFIX = "-item";			// newjob-item, stlucia-item
+static const char *CH_UNLOCK_SUFFIX = "-unlock";		// newjob-unlock, stlucia-unlock
 
 static const char *CONTROLS_HINT =
 	"Controls: WASD to move, mouse to look, Shift to run, Ctrl to creep, C to crouch, Space to jump or mantle onto ledges. "
@@ -230,6 +285,28 @@ static void Arcade_Probe_f( const idCmdArgs &args ) {
 	}
 }
 
+// "arcade_give <entityName>": puts a map entity into the player's inventory (test hook
+// for the item challenges; the agent has no console)
+static void Arcade_Give_f( const idCmdArgs &args ) {
+	idPlayer *player = gameLocal.GetLocalPlayer();
+	if ( args.Argc() < 2 || !player ) { common->Printf( "usage: arcade_give <entityName>\n" ); return; }
+	idEntity *ent = gameLocal.FindEntity( args.Argv( 1 ) );
+	if ( !ent ) { common->Printf( "arcade_give: entity '%s' not found\n", args.Argv( 1 ) ); return; }
+	CInventoryItemPtr item = player->AddToInventory( ent );
+	common->Printf( "arcade_give: %s -> %s\n", args.Argv( 1 ), item ? "in inventory" : "not an inventory item" );
+}
+
+// "arcade_unlock <entityName>": unlocks a door, chest or lock (test hook for the unlock challenges)
+static void Arcade_Unlock_f( const idCmdArgs &args ) {
+	if ( args.Argc() < 2 ) { common->Printf( "usage: arcade_unlock <entityName>\n" ); return; }
+	idEntity *ent = gameLocal.FindEntity( args.Argv( 1 ) );
+	if ( !ent ) { common->Printf( "arcade_unlock: entity '%s' not found\n", args.Argv( 1 ) ); return; }
+	if ( ent->IsType( CBinaryFrobMover::Type ) ) static_cast<CBinaryFrobMover *>( ent )->Unlock();
+	else if ( ent->IsType( CFrobLock::Type ) ) static_cast<CFrobLock *>( ent )->Unlock();
+	else { common->Printf( "arcade_unlock: '%s' is not a frob mover or lock\n", args.Argv( 1 ) ); return; }
+	common->Printf( "arcade_unlock: %s unlocked\n", args.Argv( 1 ) );
+}
+
 // "arcade_dumpframe <file.ppm>": writes the next frame handed to the SDK, as the agent
 // would see it (upright, RGB), to check orientation and colour order.
 static void Arcade_DumpFrame_f( const idCmdArgs &args ) {
@@ -271,6 +348,8 @@ void CArcadeIntegration::Init() {
 
 	common->Printf( "--------- Arcade SDK ----------\n" );
 	cmdSystem->AddCommand( "arcade_probe", Arcade_Probe_f, CMD_FL_GAME, "arcade SDK diagnostic: player objective flag and what an objective volume's clip query sees" );
+	cmdSystem->AddCommand( "arcade_give", Arcade_Give_f, CMD_FL_GAME | CMD_FL_CHEAT, "arcade SDK test hook: move a map entity into the player's inventory" );
+	cmdSystem->AddCommand( "arcade_unlock", Arcade_Unlock_f, CMD_FL_GAME | CMD_FL_CHEAT, "arcade SDK test hook: unlock a door, chest or lock" );
 	cmdSystem->AddCommand( "arcade_dumpframe", Arcade_DumpFrame_f, CMD_FL_GAME, "arcade SDK diagnostic: write the next frame submitted to the SDK as a PPM file" );
 	if ( !sdk.Load() ) {
 		common->Warning( "Arcade SDK disabled: %s", sdk.GetError() );
@@ -441,13 +520,18 @@ namespace {
 }
 
 bool CArcadeIntegration::IsMissionChallenge( const std::string &id ) const {
-	return id == CH_COMPLETE_MISSION || id == CH_STEAL_LOOT || id == CH_KNOCKOUT || id == CH_EXPLORE;
+	return id == CH_COMPLETE_MISSION || id == CH_STEAL_LOOT || id == CH_KNOCKOUT || id == CH_EXPLORE || id == CH_PICKPOCKET || id == CH_STAY_HIDDEN;
+}
+
+bool CArcadeIntegration::ChallengeHasSuffix( const std::string &id, const char *suffix ) const {
+	size_t n = strlen( suffix );
+	return id.size() > n && id.compare( id.size() - n, std::string::npos, suffix ) == 0;
 }
 
 int CArcadeIntegration::MissionIndexForChallenge( const std::string &id ) const {
 	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
 		std::string prefix = MISSIONS[m].id;
-		if ( id == prefix + CH_OBJECTIVE_SUFFIX || id == prefix + CH_REACH_SUFFIX ) {
+		if ( id == prefix + CH_OBJECTIVE_SUFFIX || id == prefix + CH_REACH_SUFFIX || id == prefix + CH_ITEM_SUFFIX || id == prefix + CH_UNLOCK_SUFFIX ) {
 			return m;
 		}
 	}
@@ -455,15 +539,23 @@ int CArcadeIntegration::MissionIndexForChallenge( const std::string &id ) const 
 }
 
 const char *CArcadeIntegration::ChallengeInstructionTemplate( const std::string &id ) const {
-	if ( id == CH_COMPLETE_MISSION ) return "Play the mission '{mission}' on {difficulty} difficulty and complete every mandatory objective within {minutes} minutes.";
+	if ( id == CH_COMPLETE_MISSION ) return "Play the mission '{mission}' on {difficulty} difficulty and complete every mandatory objective within {minutes} minutes. Stealth rule: {stealth}. Killing: {kills}.";
+	if ( id == CH_PICKPOCKET ) return "In the mission '{mission}' ({difficulty} difficulty), pickpocket {count} item(s) from guards or townsfolk within {minutes} minutes: sneak up behind someone who carries a key or purse and frob it off their belt without being noticed. Stealth rule: {stealth}.";
+	if ( id == CH_STAY_HIDDEN ) return "In the mission '{mission}' ({difficulty} difficulty), starting {start}, stay out of trouble for {minutes} minutes. Stealth rule: {stealth}.";
 	if ( id == CH_STEAL_LOOT ) return "In the mission '{mission}' ({difficulty} difficulty), steal at least {percent}% of all the loot in the level within {minutes} minutes. Stealth rule: {stealth}.";
 	if ( id == CH_KNOCKOUT ) return "In the mission '{mission}' ({difficulty} difficulty), knock out {count} guard(s) with the blackjack within {minutes} minutes without killing anyone.";
 	if ( id == CH_EXPLORE ) return "Explore the mission '{mission}' ({difficulty} difficulty) for {minutes} minutes and visit as many distinct areas as you can.";
 	if ( MissionIndexForChallenge( id ) >= 0 ) {
-		if ( id.size() > strlen( CH_REACH_SUFFIX ) && id.compare( id.size() - strlen( CH_REACH_SUFFIX ), std::string::npos, CH_REACH_SUFFIX ) == 0 ) {
-			return "Find your way to {location} within {minutes} minutes ({difficulty} difficulty). Stealth rule: {stealth}.";
+		if ( ChallengeHasSuffix( id, CH_REACH_SUFFIX ) ) {
+			return "Starting {start}, find your way to {location} within {minutes} minutes ({difficulty} difficulty). Stealth rule: {stealth}.";
 		}
-		return "In this mission ({difficulty} difficulty), complete the objective '{objective}' within {minutes} minutes.";
+		if ( ChallengeHasSuffix( id, CH_ITEM_SUFFIX ) ) {
+			return "Within {minutes} minutes ({difficulty} difficulty), get hold of {item} and keep it in your inventory. Stealth rule: {stealth}.";
+		}
+		if ( ChallengeHasSuffix( id, CH_UNLOCK_SUFFIX ) ) {
+			return "Within {minutes} minutes ({difficulty} difficulty), unlock and open {door}, with its key or with your lockpicks. Stealth rule: {stealth}.";
+		}
+		return "In this mission ({difficulty} difficulty), complete the objective '{objective}' within {minutes} minutes. Stealth rule: {stealth}.";
 	}
 	return "";
 }
@@ -489,6 +581,13 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 	}
 	for ( int i = 0; i < 3; i++ ) difficulties.Append( DIFFICULTY_NAMES[i] );
 	for ( int i = 0; i < 3; i++ ) stealth.Append( STEALTH_NAMES[i] );
+	idStrList kills, starts, hiddenStealth, hiddenStarts;
+	for ( int i = 0; i < 2; i++ ) kills.Append( KILLS_NAMES[i] );
+	for ( int i = 0; i < 5; i++ ) starts.Append( START_TIERS[i] );
+	for ( int i = 1; i < 3; i++ ) hiddenStealth.Append( STEALTH_NAMES[i] );
+	for ( int i = 1; i < 5; i++ ) hiddenStarts.Append( START_TIERS[i] );
+	static const char *START_DESC = "Where the player begins: the mission start, or placed outside / at the entrance / inside / deep in the guarded area";
+	static const char *KILLS_DESC = "forbidden: any kill (by the player or otherwise) fails the attempt";
 
 	// --- complete-mission
 	{
@@ -496,6 +595,8 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 		Writer c;
 		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
 		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "kills", KILLS_DESC, kills, "allowed" );
 		AddIntVar( c, "minutes", MINUTES_DESC, 10, 120, 45, 5 );
 		AddChallenge( init, c, CH_COMPLETE_MISSION, "Complete the mission", ChallengeInstructionTemplate( CH_COMPLETE_MISSION ),
 			"The full game loop: the mission's own objectives judge the attempt (mission complete = success, mission failed or death = failure). "
@@ -512,6 +613,7 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 		static const char *metrics[] = { "mission/objectives_complete", "mission/stealth_score", "ai/knockouts", "ai/kills", nullptr };
 		Writer c;
 		AddEnumVar( c, "objective", "Which of the mission's objectives to complete", slugs, slugs[0].c_str() );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
 		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
 		AddIntVar( c, "minutes", MINUTES_DESC, 5, 60, 20, 5 );
 		std::string id = std::string( MISSIONS[m].id ) + CH_OBJECTIVE_SUFFIX;
@@ -532,6 +634,7 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 		static const char *metrics[] = { "player/distance_travelled_m", "mission/stealth_score", "ai/max_alert_index", nullptr };
 		Writer c;
 		AddEnumVar( c, "location", "Target area (an info_location of the map; the instruction names it in plain words)", entities, entities[0].c_str() );
+		AddEnumVar( c, "start", START_DESC, starts, START_MISSION );
 		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
 		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
 		AddIntVar( c, "minutes", MINUTES_DESC, 2, 30, 10, 1 );
@@ -539,6 +642,70 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 		AddChallenge( init, c, id.c_str(), va( "%s: reach a place", MISSIONS[m].display ), ChallengeInstructionTemplate( id ),
 			va( "Navigation and infiltration in '%s' from the mission start. Success when the player stands in the target area; the stealth rule turns it into a ghosting test.", MISSIONS[m].display ),
 			metrics, 1800 );
+	}
+	// --- per-mission item challenges
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( !missions[m].available ) continue;
+		idStrList slugs;
+		for ( int i = 0; i < NUM_ITEMS; i++ ) {
+			if ( idStr::Cmp( ITEMS[i].mission, MISSIONS[m].id ) == 0 ) slugs.Append( ITEMS[i].slug );
+		}
+		if ( slugs.Num() == 0 ) continue;
+		static const char *metrics[] = { "mission/stealth_score", "mission/pockets_picked", "ai/knockouts", nullptr };
+		Writer c;
+		AddEnumVar( c, "item", "Which item to obtain (keys carried by guards, keys and readables lying about, the mission's prize)", slugs, slugs[0].c_str() );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 60, 15, 5 );
+		std::string id = std::string( MISSIONS[m].id ) + CH_ITEM_SUFFIX;
+		AddChallenge( init, c, id.c_str(), va( "%s: obtain an item", MISSIONS[m].display ), ChallengeInstructionTemplate( id ),
+			va( "Acquisition in '%s': find a specific item and pick it up (frob), or lift it from the guard who carries it (pickpocket from behind, or knock him out). Judged by the player's inventory.", MISSIONS[m].display ),
+			metrics, 3600 );
+	}
+	// --- per-mission unlock challenges
+	for ( int m = 0; m < NUM_MISSIONS; m++ ) {
+		if ( !missions[m].available ) continue;
+		idStrList slugs;
+		for ( int i = 0; i < NUM_DOORS; i++ ) {
+			if ( idStr::Cmp( DOORS[i].mission, MISSIONS[m].id ) == 0 ) slugs.Append( DOORS[i].slug );
+		}
+		if ( slugs.Num() == 0 ) continue;
+		static const char *metrics[] = { "mission/stealth_score", "mission/pockets_picked", nullptr };
+		Writer c;
+		AddEnumVar( c, "door", "Which locked door, chest or lock to open", slugs, slugs[0].c_str() );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 60, 15, 5 );
+		std::string id = std::string( MISSIONS[m].id ) + CH_UNLOCK_SUFFIX;
+		AddChallenge( init, c, id.c_str(), va( "%s: unlock a door", MISSIONS[m].display ), ChallengeInstructionTemplate( id ),
+			va( "Locks and keys in '%s': find the key (often on a guard) or use the lockpicks (select them with P, hold frob/use on the lock and follow the pick sounds). Success when the lock is open.", MISSIONS[m].display ),
+			metrics, 3600 );
+	}
+	// --- pickpocket
+	{
+		static const char *metrics[] = { "mission/pockets_picked", "mission/stealth_score", "ai/max_alert_index", nullptr };
+		Writer c;
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddIntVar( c, "count", "Items to lift from unaware AI", 1, 3, 1, 1 );
+		AddEnumVar( c, "stealth", STEALTH_DESC, stealth, "any" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", MINUTES_DESC, 5, 40, 15, 5 );
+		AddChallenge( init, c, CH_PICKPOCKET, "Pickpocket", ChallengeInstructionTemplate( CH_PICKPOCKET ),
+			"Close-quarters stealth: get behind a moving guard unnoticed and frob the key or purse on his belt. Judged by the mission's pockets-picked statistic. Saint Lucia has several key-carrying guards; A New Job has Lord Rothwick's key.",
+			metrics, 2400 );
+	}
+	// --- stay-hidden
+	{
+		static const char *metrics[] = { "mission/stealth_score", "ai/max_alert_index", "player/lightgem", nullptr };
+		Writer c;
+		AddEnumVar( c, "mission", "Which mission to play", missionIds, missionIds[0].c_str() );
+		AddEnumVar( c, "start", "Where the player is placed, among the patrols", hiddenStarts, "inside" );
+		AddEnumVar( c, "stealth", "unseen: fail if any AI searches for or spots the player; ghost: fail at the first suspicious AI", hiddenStealth, "unseen" );
+		AddEnumVar( c, "difficulty", DIFFICULTY_DESC, difficulties, "easy" );
+		AddIntVar( c, "minutes", "How long to stay undetected", 1, 15, 5, 1 );
+		AddChallenge( init, c, CH_STAY_HIDDEN, "Stay hidden", ChallengeInstructionTemplate( CH_STAY_HIDDEN ),
+			"Evasion: dropped into a patrolled part of the map, survive the time limit without the stealth rule being broken. Success at the time limit; score weighted by how quiet it stayed.",
+			metrics, 1200 );
 	}
 	// --- steal-loot
 	{
@@ -588,6 +755,9 @@ void CArcadeIntegration::BuildInitRequest( ArcadeProto::Writer &init ) {
 	AddMetricDef( init, "ai/knockouts", METRIC_COUNTER, "count", "AI knocked out this map" );
 	AddMetricDef( init, "ai/kills", METRIC_COUNTER, "count", "AI killed this map" );
 	AddMetricDef( init, "explore/locations_visited", METRIC_COUNTER, "count", "Distinct named areas entered during the attempt" );
+	AddMetricDef( init, "mission/pockets_picked", METRIC_COUNTER, "count", "Items pickpocketed from AI this map" );
+
+	BuildBenchmark( init );
 
 	init.Bytes( 6, arcade_vendor_pb, arcade_vendor_pb_len );
 	init.String( 7, CHALLENGES_SERVICE );
@@ -818,8 +988,38 @@ bool CArcadeIntegration::ValidateAttempt( const Attempt &a, std::string &error )
 			error = va( "unknown location '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
 			return false;
 		}
+	} else if ( id == prefix + CH_ITEM_SUFFIX ) {
+		VarMap::const_iterator it = a.vars.find( "item" );
+		if ( it == a.vars.end() || !FindItemSpec( a.mission, it->second.s ) ) {
+			error = va( "unknown item '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
+			return false;
+		}
+	} else if ( id == prefix + CH_UNLOCK_SUFFIX ) {
+		VarMap::const_iterator it = a.vars.find( "door" );
+		if ( it == a.vars.end() || !FindDoorSpec( a.mission, it->second.s ) ) {
+			error = va( "unknown door '%s'", it == a.vars.end() ? "" : it->second.s.c_str() );
+			return false;
+		}
 	} else if ( !IsMissionChallenge( id ) ) {
 		error = va( "unknown challenge '%s'", id.c_str() );
+		return false;
+	}
+	if ( a.startTier != START_MISSION ) {
+		const StartSpec *start = FindStartSpec( a.mission, a.startTier );
+		if ( !start ) {
+			error = va( "unknown start '%s'", a.startTier.c_str() );
+			return false;
+		}
+		if ( id == prefix + CH_REACH_SUFFIX ) {
+			VarMap::const_iterator it = a.vars.find( "location" );
+			if ( it != a.vars.end() && it->second.s == start->entity ) {
+				error = va( "start '%s' is already the target location '%s'", a.startTier.c_str(), it->second.s.c_str() );
+				return false;
+			}
+		}
+	}
+	if ( id == CH_STAY_HIDDEN && a.stealth == STEALTH_ANY ) {
+		error = "stay-hidden needs a stealth rule (unseen or ghost)";
 		return false;
 	}
 	if ( a.limitSeconds <= 0 ) {
@@ -901,6 +1101,14 @@ void CArcadeIntegration::HandleStartChallenge( uint64_t reqId, ArcadeProto::Read
 			}
 		}
 	}
+	{
+		VarMap::const_iterator it = a.vars.find( "kills" );
+		a.killsForbidden = ( it != a.vars.end() && it->second.s == KILLS_NAMES[1] );
+	}
+	{
+		VarMap::const_iterator it = a.vars.find( "start" );
+		a.startTier = ( it != a.vars.end() && !it->second.s.empty() ) ? it->second.s : START_MISSION;
+	}
 
 	std::string error;
 	if ( !ValidateAttempt( a, error ) ) {
@@ -958,6 +1166,8 @@ void CArcadeIntegration::StartRunning() {
 	player->ForceReady();		// skip the "press attack to start" overlay
 	gameLocal.random.SetSeed( (int)( attempt.seed ^ ( attempt.seed >> 32 ) ) );
 
+	ApplyStartPosition();
+
 	attempt.startGameTime = gameLocal.time;
 	attempt.lastOrigin = player->GetPhysics()->GetOrigin();
 	attempt.distanceUnits = 0.0f;
@@ -975,6 +1185,67 @@ void CArcadeIntegration::StartRunning() {
 
 	ReportChallengeStarted();
 	Log( LOG_INFO, "challenge %s running on %s (limit %ds, difficulty %d)", attempt.challengeId.c_str(), MISSIONS[attempt.mission].map, attempt.limitSeconds, attempt.difficulty );
+}
+
+void CArcadeIntegration::ApplyStartPosition() {
+	if ( attempt.startTier == START_MISSION ) {
+		return;
+	}
+	const StartSpec *start = FindStartSpec( attempt.mission, attempt.startTier );
+	idPlayer *player = gameLocal.GetLocalPlayer();
+	if ( !start || !player ) {
+		return;
+	}
+	const MissionRuntime &rt = missions[attempt.mission];
+	int idx = rt.locationNames.FindIndex( start->entity );
+	if ( idx < 0 ) {
+		Log( LOG_WARN, "start '%s': info_location '%s' not in map %s; starting at the mission start", attempt.startTier.c_str(), start->entity, MISSIONS[attempt.mission].map );
+		return;
+	}
+	// info_location markers float in the room; Teleport snaps to the floor below
+	idAngles angles = player->viewAngles;
+	angles.pitch = 0.0f;
+	angles.roll = 0.0f;
+	player->Teleport( rt.locationOrigins[idx], angles, nullptr );
+	Log( LOG_INFO, "start '%s': placed the player at %s (%s)", attempt.startTier.c_str(), start->entity, rt.locationOrigins[idx].ToString() );
+}
+
+const CArcadeIntegration::ItemSpec *CArcadeIntegration::FindItemSpec( int mission, const std::string &slug ) const {
+	if ( mission < 0 ) return nullptr;
+	for ( int i = 0; i < NUM_ITEMS; i++ ) {
+		if ( idStr::Cmp( ITEMS[i].mission, MISSIONS[mission].id ) == 0 && slug == ITEMS[i].slug ) return &ITEMS[i];
+	}
+	return nullptr;
+}
+
+const CArcadeIntegration::DoorSpec *CArcadeIntegration::FindDoorSpec( int mission, const std::string &slug ) const {
+	if ( mission < 0 ) return nullptr;
+	for ( int i = 0; i < NUM_DOORS; i++ ) {
+		if ( idStr::Cmp( DOORS[i].mission, MISSIONS[mission].id ) == 0 && slug == DOORS[i].slug ) return &DOORS[i];
+	}
+	return nullptr;
+}
+
+const CArcadeIntegration::StartSpec *CArcadeIntegration::FindStartSpec( int mission, const std::string &tier ) const {
+	if ( mission < 0 ) return nullptr;
+	for ( int i = 0; i < NUM_STARTS; i++ ) {
+		if ( idStr::Cmp( STARTS[i].mission, MISSIONS[mission].id ) == 0 && tier == STARTS[i].tier ) return &STARTS[i];
+	}
+	return nullptr;
+}
+
+bool CArcadeIntegration::DoorUnlocked( const DoorSpec &door, bool &exists ) const {
+	idEntity *ent = gameLocal.FindEntity( door.entity );
+	exists = ent != nullptr;
+	if ( !ent ) return false;
+	if ( ent->IsType( CBinaryFrobMover::Type ) ) {
+		CBinaryFrobMover *mover = static_cast<CBinaryFrobMover *>( ent );
+		return !mover->IsLocked() || mover->IsOpen();
+	}
+	if ( ent->IsType( CFrobLock::Type ) ) {
+		return !static_cast<CFrobLock *>( ent )->IsLocked();
+	}
+	return false;
 }
 
 void CArcadeIntegration::HandleStopChallenge( uint64_t reqId, ArcadeProto::Reader req ) {
@@ -1017,6 +1288,22 @@ std::string CArcadeIntegration::ResolveInstruction( const Attempt &a ) const {
 			if ( it->second.s == STEALTH_NAMES[STEALTH_UNSEEN] ) value = "unseen (no guard may start searching for you or spot you)";
 			else if ( it->second.s == STEALTH_NAMES[STEALTH_GHOST] ) value = "ghost (no guard may even become suspicious)";
 			else value = "none (being noticed is allowed, but lowers your score)";
+		}
+		if ( it->first == "kills" ) value = ( it->second.s == KILLS_NAMES[1] ) ? "forbidden (any death of a guard or civilian fails the attempt)" : "allowed (but every alert still lowers your score)";
+		if ( it->first == "start" ) {
+			if ( it->second.s == START_MISSION ) value = "at the mission start";
+			else {
+				const StartSpec *st = FindStartSpec( a.mission, it->second.s );
+				value = st ? std::string( "placed " ) + ( it->second.s == "outside" ? "outside, " : it->second.s == "entrance" ? "at the entrance, " : it->second.s == "inside" ? "inside, " : "deep in the guarded part, " ) + "in " + LocationDisplayName( a.mission, st->entity ) : it->second.s;
+			}
+		}
+		if ( it->first == "item" ) {
+			const ItemSpec *spec = FindItemSpec( a.mission, it->second.s );
+			if ( spec ) value = std::string( spec->display ) + " (" + spec->hint + ")";
+		}
+		if ( it->first == "door" ) {
+			const DoorSpec *spec = FindDoorSpec( a.mission, it->second.s );
+			if ( spec ) value = std::string( spec->display ) + " (" + spec->hint + ")";
 		}
 		size_t pos;
 		while ( ( pos = text.find( placeholder ) ) != std::string::npos ) {
@@ -1144,8 +1431,8 @@ void CArcadeIntegration::Judge() {
 	const std::string &id = attempt.challengeId;
 	std::string prefix = MISSIONS[attempt.mission].id;
 	const float stealth = StealthFactor( s );
-	const char *statsLine = va( "stealth score %.0f, seen %d times, %d knockouts, %d kills, loot %d/%d, %.1f s",
-		s.stealthScore, s.timesSeen, s.knockouts, s.kills, s.lootFound, s.lootTotal, elapsed );
+	const char *statsLine = va( "stealth score %.0f, seen %d times, %d knockouts, %d kills, %d pockets picked, loot %d/%d, %.1f s",
+		s.stealthScore, s.timesSeen, s.knockouts, s.kills, s.pocketsPicked, s.lootFound, s.lootTotal, elapsed );
 
 	// universal failure conditions
 	if ( player->health <= 0 ) {
@@ -1159,6 +1446,10 @@ void CArcadeIntegration::Judge() {
 	const char *why = nullptr;
 	if ( StealthViolated( s, attempt.stealth, why ) ) {
 		CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "stealth rule broken: %s (%s)", why, statsLine ) );
+		return;
+	}
+	if ( attempt.killsForbidden && s.kills > 0 ) {
+		CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "killing is forbidden in this attempt (%s)", statsLine ) );
 		return;
 	}
 
@@ -1216,6 +1507,38 @@ void CArcadeIntegration::Judge() {
 			CompleteAttempt( OUTCOME_TIMEOUT, count > 0 ? (double)s.knockouts / count : 0.0, va( "%d/%d knockouts when time ran out (%s)", s.knockouts, count, statsLine ) );
 			return;
 		}
+	} else if ( id == prefix + CH_ITEM_SUFFIX ) {
+		const ItemSpec *spec = FindItemSpec( attempt.mission, attempt.vars["item"].s );
+		if ( spec && player->Inventory() && player->Inventory()->GetItem( spec->invName ) ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "obtained %s (%s)", spec->display, statsLine ) );
+			return;
+		}
+	} else if ( id == prefix + CH_UNLOCK_SUFFIX ) {
+		const DoorSpec *spec = FindDoorSpec( attempt.mission, attempt.vars["door"].s );
+		bool exists = false;
+		if ( spec && DoorUnlocked( *spec, exists ) ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "%s is open (%s)", spec->display, statsLine ) );
+			return;
+		}
+		if ( spec && !exists ) {
+			CompleteAttempt( OUTCOME_FAILURE, 0.0, va( "%s (entity '%s') does not exist in this map", spec->display, spec->entity ) );
+			return;
+		}
+	} else if ( id == CH_PICKPOCKET ) {
+		int count = (int)attempt.vars["count"].i;
+		if ( s.pocketsPicked >= count ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "%d pockets picked (%s)", s.pocketsPicked, statsLine ) );
+			return;
+		}
+		if ( timeUp ) {
+			CompleteAttempt( OUTCOME_TIMEOUT, count > 0 ? (double)s.pocketsPicked / count : 0.0, va( "%d/%d pockets picked when time ran out (%s)", s.pocketsPicked, count, statsLine ) );
+			return;
+		}
+	} else if ( id == CH_STAY_HIDDEN ) {
+		if ( timeUp ) {
+			CompleteAttempt( OUTCOME_SUCCESS, stealth, va( "stayed hidden for %d s (%s)", attempt.limitSeconds, statsLine ) );
+			return;
+		}
 	} else if ( id == CH_EXPLORE ) {
 		if ( timeUp ) {
 			int total = missions[attempt.mission].locationNames.Num();
@@ -1259,6 +1582,7 @@ void CArcadeIntegration::CompleteAttempt( Outcome outcome, double score, const c
 		{ "ai/knockouts", haveStats ? s.knockouts : 0.0 },
 		{ "ai/kills", haveStats ? s.kills : 0.0 },
 		{ "mission/objectives_complete", haveStats ? s.objectivesMandatoryComplete : 0.0 },
+		{ "mission/pockets_picked", haveStats ? s.pocketsPicked : 0.0 },
 		{ "mission/damage_received", haveStats ? s.damageReceived : 0.0 },
 	};
 	for ( size_t i = 0; i < sizeof( finals ) / sizeof( finals[0] ); i++ ) {
@@ -1730,6 +2054,24 @@ void CArcadeIntegration::RequestFrameDump( const char *path ) {
 	dumpFramePath = path;
 }
 
+bool CArcadeIntegration::IsGameplayKey( int key ) {
+	// The agent's input is gameplay input only (SDK guide, "Keep the agent in the game"):
+	// nothing it sends may open the menu, the console, save/load, screenshots or chat.
+	switch ( key ) {
+	case K_ESCAPE:		// togglemenu
+	case K_F5:			// savegame quick
+	case K_F9:			// loadgame quick
+	case K_F12:			// screenshot
+	case K_PAUSE:		// pause
+	case K_F6: case K_F7: case K_F10: case K_F11:	// unbound / editor impulses
+	case 'y':			// clientMessageMode (chat text entry)
+	case '`': case '^':	// console
+		return false;
+	default:
+		return true;
+	}
+}
+
 int CArcadeIntegration::KeyCodeToTdmKey( int code ) {
 	// arcade.sdk.v1.KeyCode (W3C KeyboardEvent.code positions) -> framework/KeyInput.h keynums
 	if ( code >= 20 && code <= 45 ) return 'a' + ( code - 20 );			// KEY_A .. KEY_Z
@@ -1821,7 +2163,7 @@ void CArcadeIntegration::ApplyInputEvent( ArcadeProto::Reader event ) {
 	switch ( kind ) {
 	case INEV_KEY: {
 		int key = KeyCodeToTdmKey( intA );
-		if ( key ) Sys_InjectKeyEvent( key, down );
+		if ( key && IsGameplayKey( key ) ) Sys_InjectKeyEvent( key, down );
 		break;
 	}
 	case INEV_BUTTON:
@@ -1900,6 +2242,104 @@ void CArcadeIntegration::PollInput() {
 	}
 	if ( dropped && inputWarnings++ < 5 ) {
 		Log( LOG_WARN, "agent input: %u events dropped by the SDK this step", dropped );
+	}
+}
+
+// ===========================================================================
+// InitRequest.benchmark: the cases arcade plays, most informative first.
+// Every prefix should be a good benchmark on its own (see the SDK guide,
+// "Rank a benchmark"): each challenge once at telling settings, then what
+// changes the outcome most, then combinations, then the fine sweeps.
+// ===========================================================================
+
+namespace {
+	struct BenchVar { const char *name; const char *enumValue; int intValue; };	// enumValue null => int
+	struct BenchCase { const char *challenge; BenchVar vars[4]; };
+	#define BV_E(n, v) { n, v, 0 }
+	#define BV_I(n, v) { n, nullptr, v }
+	#define BV_END { nullptr, nullptr, 0 }
+	const BenchCase BENCHMARK[] = {
+		// 1. each challenge once, at settings that separate a capable agent from a weak one
+		{ "complete-mission",  { BV_E( "mission", "newjob" ), BV_END } },
+		{ "stlucia-objective", { BV_E( "objective", "steal-relic" ), BV_END } },
+		{ "newjob-objective",  { BV_E( "objective", "steal-rubies" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "church_lucia" ), BV_END } },
+		{ "steal-loot",        { BV_E( "mission", "stlucia" ), BV_I( "percent", 30 ), BV_END } },
+		{ "stlucia-item",      { BV_E( "item", "church-entrance-key" ), BV_END } },
+		{ "stlucia-unlock",    { BV_E( "door", "vestibule-door" ), BV_END } },
+		{ "pickpocket",        { BV_E( "mission", "stlucia" ), BV_END } },
+		{ "knockout",          { BV_E( "mission", "newjob" ), BV_END } },
+		{ "stay-hidden",       { BV_E( "mission", "stlucia" ), BV_END } },
+		{ "newjob-reach",      { BV_E( "location", "kitchen" ), BV_END } },
+		{ "explore",           { BV_E( "mission", "stlucia" ), BV_END } },
+		// 2. what changes the outcome most
+		{ "complete-mission",  { BV_E( "mission", "stlucia" ), BV_I( "minutes", 60 ), BV_END } },
+		{ "complete-mission",  { BV_E( "mission", "newjob" ), BV_E( "difficulty", "hard" ), BV_END } },
+		{ "complete-mission",  { BV_E( "mission", "newjob" ), BV_E( "stealth", "unseen" ), BV_END } },
+		{ "complete-mission",  { BV_E( "mission", "newjob" ), BV_E( "kills", "forbidden" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "church_lucia" ), BV_E( "stealth", "ghost" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "basement_main" ), BV_E( "start", "inside" ), BV_END } },
+		{ "steal-loot",        { BV_E( "mission", "stlucia" ), BV_I( "percent", 60 ), BV_E( "stealth", "unseen" ), BV_END } },
+		{ "stay-hidden",       { BV_E( "mission", "stlucia" ), BV_E( "start", "deep" ), BV_E( "stealth", "ghost" ), BV_END } },
+		{ "knockout",          { BV_E( "mission", "stlucia" ), BV_I( "count", 2 ), BV_END } },
+		{ "newjob-objective",  { BV_E( "objective", "enter-tavern" ), BV_END } },
+		{ "stlucia-objective", { BV_E( "objective", "damage-statue" ), BV_END } },
+		{ "newjob-unlock",     { BV_E( "door", "cash-box" ), BV_END } },
+		{ "newjob-item",       { BV_E( "item", "cash-box-key" ), BV_END } },
+		// 3. combinations
+		{ "newjob-reach",      { BV_E( "location", "kitchen_up" ), BV_E( "start", "entrance" ), BV_E( "stealth", "unseen" ), BV_END } },
+		{ "stlucia-unlock",    { BV_E( "door", "relic-chest" ), BV_E( "stealth", "unseen" ), BV_END } },
+		{ "stlucia-item",      { BV_E( "item", "priests-key" ), BV_E( "difficulty", "hard" ), BV_END } },
+		{ "pickpocket",        { BV_E( "mission", "stlucia" ), BV_I( "count", 2 ), BV_E( "stealth", "unseen" ), BV_END } },
+		{ "complete-mission",  { BV_E( "mission", "stlucia" ), BV_E( "difficulty", "hard" ), BV_E( "stealth", "ghost" ), BV_I( "minutes", 90 ) } },
+		// 4. the sweeps
+		{ "complete-mission",  { BV_E( "mission", "newjob" ), BV_E( "difficulty", "medium" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "church_yard" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "kitchen" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "generator_room" ), BV_END } },
+		{ "stlucia-reach",     { BV_E( "location", "secret_sewer" ), BV_END } },
+		{ "newjob-reach",      { BV_E( "location", "room_down" ), BV_END } },
+		{ "stlucia-item",      { BV_E( "item", "padlock-key" ), BV_END } },
+		{ "stlucia-item",      { BV_E( "item", "walkway-key" ), BV_END } },
+		{ "stlucia-item",      { BV_E( "item", "relic" ), BV_END } },
+		{ "stlucia-unlock",    { BV_E( "door", "sewer-padlock" ), BV_END } },
+		{ "stlucia-unlock",    { BV_E( "door", "front-door" ), BV_END } },
+		{ "newjob-unlock",     { BV_E( "door", "footlocker" ), BV_END } },
+		{ "pickpocket",        { BV_E( "mission", "newjob" ), BV_END } },
+		{ "stay-hidden",       { BV_E( "mission", "newjob" ), BV_E( "start", "entrance" ), BV_END } },
+		{ "steal-loot",        { BV_E( "mission", "newjob" ), BV_I( "percent", 50 ), BV_END } },
+		{ "explore",           { BV_E( "mission", "newjob" ), BV_END } },
+		{ "stlucia-objective", { BV_E( "objective", "loot-quota" ), BV_END } },
+		{ "newjob-objective",  { BV_E( "objective", "meet-contact" ), BV_I( "minutes", 45 ), BV_END } },
+	};
+	#undef BV_E
+	#undef BV_I
+	#undef BV_END
+}
+
+void CArcadeIntegration::BuildBenchmark( ArcadeProto::Writer &init ) const {
+	for ( size_t c = 0; c < sizeof( BENCHMARK ) / sizeof( BENCHMARK[0] ); c++ ) {
+		const BenchCase &bc = BENCHMARK[c];
+		// only cases whose mission is in the search path
+		int m = MissionIndexForChallenge( bc.challenge );
+		if ( m < 0 ) {
+			for ( int v = 0; v < 4 && bc.vars[v].name; v++ ) {
+				if ( idStr::Cmp( bc.vars[v].name, "mission" ) == 0 ) {
+					for ( int i = 0; i < NUM_MISSIONS; i++ ) if ( idStr::Cmp( MISSIONS[i].id, bc.vars[v].enumValue ) == 0 ) m = i;
+				}
+			}
+		}
+		if ( m >= 0 && !missions[m].available ) continue;
+		ArcadeProto::Writer w;	// BenchmarkCase { 1 challenge_id, 2 variations[] }
+		w.String( 1, bc.challenge );
+		for ( int v = 0; v < 4 && bc.vars[v].name; v++ ) {
+			ArcadeProto::Writer var;	// VariationValue { 1 name, 10 enum_value | 11 int_value }
+			var.String( 1, bc.vars[v].name );
+			if ( bc.vars[v].enumValue ) var.String( VAR_ENUM, bc.vars[v].enumValue );
+			else var.Int64( VAR_INT, bc.vars[v].intValue );
+			w.PutMessageAlways( 2, var );
+		}
+		init.PutMessageAlways( 13, w );
 	}
 }
 

@@ -5,9 +5,9 @@ Launch:            ./run_arcade.sh        (reads SCREEN_WIDTH / SCREEN_HEIGHT, d
 Equivalent:        ./thedarkmod.x64 +set arcade_enable 1 +set arcade_buildId @BUILD_ID@ +set fs_currentfm arcade +set r_fullscreen 0 +set r_customWidth 2560 +set r_customHeight 1440 +set tdm_player_wait_until_ready 0
 Ready state:       main menu; StartChallenge loads the requested mission map itself (prologue9 or saintlucia, 4-6 s), sets the difficulty, no clicks needed.
 SDK:               libarcade_sdk.so @SDK_VERSION@ (ABI 2) next to the executable; port 6006 (ARCADE_SDK_PORT); log arcade_sdk.log next to the executable.
-Frames/input:      640x360 RGBA frames submitted every rendered frame (real time); agent input taken from the SDK each frame and injected as keyboard/mouse; the action map (InitRequest.action_map) describes the stock binds. One instance per process.
+Frames/input:      640x360 RGBA frames submitted every rendered frame (real time); agent input taken from the SDK each frame and injected as keyboard/mouse, gameplay keys only (Escape, console, save/load, screenshot and chat keys are dropped); the action map (InitRequest.action_map) describes the stock binds. One instance per process.
 Schema:            vendor.proto (service thedarkmod.v1.Game, event union thedarkmod.v1.GameEvent).
-Challenges:        complete-mission, newjob-objective, stlucia-objective, newjob-reach, stlucia-reach, steal-loot, knockout, explore -- see ARCADE_README.md.
+Challenges:        complete-mission, newjob-/stlucia-objective, newjob-/stlucia-reach, newjob-/stlucia-item, newjob-/stlucia-unlock, steal-loot, knockout, pickpocket, stay-hidden, explore -- see ARCADE_README.md. InitRequest.benchmark ranks 48 cases.
 Missions:          fms/arcade holds "A New Job" (map prologue9) and "Tears of St. Lucia" (map saintlucia) as one fan mission folder.
 Requirements:      OpenGL 3.3 on X11, glibc 2.39+; libX11, libxcb, libstdc++ from the system. Offline, no installer, no login, no sudo.
 Config/saves:      written to ~/.local/share/darkmod (fs_savepath) unless +set fs_savepath <dir> is given.

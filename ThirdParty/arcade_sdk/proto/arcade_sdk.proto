@@ -86,7 +86,33 @@ message InitRequest {
   //
   // Optional. Once declared, it should list every input the game responds
   // to: an input left out is one the agent is told does nothing.
+  //
+  // Gameplay only. No agent input may take an instance out of play (pause
+  // or main menu, settings, console, quit): the game ignores inputs that
+  // only do that, and applies only the gameplay meaning of one that does
+  // both ("Escape": "Cancel spell" cancels a cast, and otherwise does
+  // nothing rather than open the pause menu).
   map<string, string> action_map = 12;
+  // The build's own benchmark: runs of its challenges, ranked by how much each
+  // one tells about the agent playing, the most informative first. A run plays
+  // a prefix of it (`--top N`), so make every prefix a good benchmark by
+  // itself: the first few cases a broad, quick reading — each challenge once,
+  // at settings that separate a capable agent from a weak one — and the cases
+  // after them the finer sweeps, worth playing when a run can afford them.
+  //
+  // Optional. Without it a run plays each challenge once at its defaults, in
+  // the order of `challenges`. At most 1024 cases; no two may resolve to the
+  // same challenge and values.
+  repeated BenchmarkCase benchmark = 13;
+}
+
+// One run of a challenge in `InitRequest.benchmark`.
+message BenchmarkCase {
+  // A declared challenge's id.
+  string challenge_id = 1;
+  // Values for some of its variations, each one declared and within its range;
+  // the variations left out play at their defaults.
+  repeated VariationValue variations = 2;
 }
 
 message VideoSize {

@@ -119,19 +119,37 @@ name; switching `fs_currentfm` at runtime would need an engine restart.
 Every attempt reloads the chosen map (a clean world), applies the `difficulty`
 variation through the `tdm_difficulty` cvar, seeds `gameLocal.random` from the
 request, skips the "press attack to start" overlay and starts the player at the
-mission start. Judging uses the game's own systems: the objective states in
-`CMissionData`, the mission result, the mission statistics (loot, alerts,
-knockouts, kills) and the `info_location` areas.
+mission start, or, where the challenge has a `start` variation, teleports them to
+one of four tiers of the map (`outside`, `entrance`, `inside`, `deep`; the tiers
+map to `info_location`s per mission in the `STARTS` table). Judging uses the
+game's own systems: the objective states in `CMissionData`, the mission result,
+the mission statistics (loot, alerts, knockouts, kills, pockets picked), the
+player's inventory, the lock state of doors and chests and the `info_location`
+areas.
 
 | Id | Variations | Success | Failure / Timeout |
 |---|---|---|---|
-| `complete-mission` | `mission`, `difficulty`, `minutes` (10..120) | Mission result COMPLETE (all mandatory objectives). Score `0.5 + 0.5 × stealth`. | Death or mission failed. Timeout scores `0.5 × mandatory objectives done`. |
-| `newjob-objective` | `objective` ∈ enter-tavern, find-clue, steal-rubies, meet-contact; `difficulty`, `minutes` (5..60) | The objective is COMPLETE (alternatives such as the easy/normal journal variants count). Score = stealth factor. | Objective FAILED, death, mission failed, timeout. |
-| `stlucia-objective` | `objective` ∈ steal-relic, damage-statue, loot-quota, escape; `difficulty`, `minutes` | same | same |
-| `newjob-reach`, `stlucia-reach` | `location` (curated `info_location` names), `stealth` ∈ any/unseen/ghost, `difficulty`, `minutes` (2..30) | Player stands in the target area. Score `(0.5 + 0.5 × time left) × stealth`. | Stealth rule broken, death, timeout. |
+| `complete-mission` | `mission`, `difficulty`, `stealth` ∈ any/unseen/ghost, `kills` ∈ allowed/forbidden, `minutes` (10..120) | Mission result COMPLETE (all mandatory objectives). Score `0.5 + 0.5 × stealth`. | Death, mission failed, stealth rule broken, a kill when forbidden. Timeout scores `0.5 × mandatory objectives done`. |
+| `newjob-objective` | `objective` ∈ enter-tavern, find-clue, steal-rubies, meet-contact; `stealth`, `difficulty`, `minutes` (5..60) | The objective is COMPLETE (alternatives such as the easy/normal journal variants count). Score = stealth factor. | Objective FAILED, death, mission failed, stealth rule broken, timeout. |
+| `stlucia-objective` | `objective` ∈ steal-relic, damage-statue, loot-quota, escape; `stealth`, `difficulty`, `minutes` | same | same |
+| `newjob-reach`, `stlucia-reach` | `location` (curated `info_location` names), `start` ∈ mission-start/outside/entrance/inside/deep, `stealth`, `difficulty`, `minutes` (2..30) | Player stands in the target area. Score `(0.5 + 0.5 × time left) × stealth`. | Stealth rule broken, death, timeout. A `start` that is the target location is rejected. |
+| `newjob-item`, `stlucia-item` | `item` (the `ITEMS` table: keys carried by guards or lying about, the priest's journal, the relic, the cash box key), `stealth`, `difficulty`, `minutes` (5..60) | The item (by `inv_name`) is in the player's inventory. Score = stealth factor. | Stealth rule broken, death, timeout. |
+| `newjob-unlock`, `stlucia-unlock` | `door` (the `DOORS` table: doors, chests, the cash box, the sewer padlock), `stealth`, `difficulty`, `minutes` (5..60) | The entity is unlocked or open (`CBinaryFrobMover` / `CFrobLock`). Score = stealth factor. | Stealth rule broken, death, timeout; failure if the entity is missing from the map. |
 | `steal-loot` | `mission`, `percent` (10..100 of the map's total loot), `stealth`, `difficulty`, `minutes` | Loot found ≥ target. Score = stealth factor. | Stealth rule broken, death; timeout scores `found / target`. |
 | `knockout` | `mission`, `count` (1..4), `difficulty`, `minutes` | Knockouts ≥ count with no kills. | Any kill, death; timeout scores `knockouts / count`. |
+| `pickpocket` | `mission`, `count` (1..3), `stealth`, `difficulty`, `minutes` (5..40) | Pockets picked ≥ count (TDM's pickpocket statistic). Score = stealth factor. | Stealth rule broken, death; timeout scores `picked / count`. |
+| `stay-hidden` | `mission`, `start` ∈ outside/entrance/inside/deep, `stealth` ∈ unseen/ghost, `difficulty`, `minutes` (1..15) | Always at the time limit; score = stealth factor. | Stealth rule broken, death. |
 | `explore` | `mission`, `difficulty`, `minutes` (3..30) | Always at the time limit; score = distinct named areas visited / areas in the map. | Death. |
+
+`InitRequest.benchmark` (SDK ≥ 2.2.1+bf5f6c81) carries the build's own ranked
+benchmark, the `BENCHMARK` table: every challenge once at telling settings, then
+the variations that change the outcome most (difficulty, stealth, kills, start
+tier), then combinations, then sweeps over the remaining locations, items and
+doors. Every prefix is meant to be a usable benchmark on its own.
+
+Agent input is gameplay only: keys that would open the menu or console, save or
+load, take a screenshot, pause or open chat are dropped before injection
+(`IsGameplayKey`), and `Escape` is not in the action map.
 
 Stealth: `unseen` fails the attempt as soon as any AI searches for the player or
 spots them; `ghost` also fails on the first suspicious AI. The stealth factor used
@@ -142,7 +160,7 @@ own weighted alert count (0 for a perfect ghost).
 `player/distance_travelled_m`, `ai/max_alert_index`, `explore/locations_visited`,
 `mission/stealth_score`, `mission/times_seen`, `mission/loot_fraction`,
 `player/loot`, `ai/knockouts`, `ai/kills`, `mission/objectives_complete`,
-`mission/damage_received`.
+`mission/pockets_picked`, `mission/damage_received`.
 
 Resolved instructions give the agent the mission premise, the task with the
 variation values spelled out in plain words, and a short controls primer (the
@@ -155,7 +173,9 @@ numbering from the map's `atdm:target_addobjectives` entity.
 
 The console command `arcade_probe <entity>` (available when the SDK is enabled)
 prints the player's objective flag and what an objective volume's clip query sees;
-handy when a location objective does not fire where you expect. Note that
+handy when a location objective does not fire where you expect. `arcade_give
+<entity>` and `arcade_unlock <entity>` are test hooks (cheats) that drive the item
+and unlock challenges from `arcade/e2e_test.py`. Note that
 `info_tdm_objective_location` volumes are often small boxes at doorways rather
 than the whole room.
 
@@ -175,8 +195,8 @@ Events (`thedarkmod.v1.GameEvent`): `player_died`, `loot_picked_up`,
 
 Metrics: `player/health`, `player/loot`, `player/lightgem`,
 `ai/max_alert_index`, `mission/stealth_score`, `mission/loot_fraction`,
-`ai/knockouts`, `ai/kills`, `mission/objectives_complete`, and during an attempt
-`player/distance_travelled_m`, `explore/locations_visited`.
+`ai/knockouts`, `ai/kills`, `mission/objectives_complete`, `mission/pockets_picked`,
+and during an attempt `player/distance_travelled_m`, `explore/locations_visited`.
 
 ## Testing
 

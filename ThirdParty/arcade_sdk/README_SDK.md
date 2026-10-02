@@ -13,11 +13,24 @@ in the SDK zip as `README.md`, next to:
 | `examples/host.c` | A complete minimal integration in C: one instance, frames, input, challenges. |
 | `CHANGELOG.md` | What changed in each version, and what a version number promises. |
 
-There is one zip per platform and version, `arcade_sdk-windows-<version>.zip`
-for Windows and `arcade_sdk-linux-<version>.zip` for Linux, built from the
-same commit. The API, protos and `arcade-sdk` are identical; only the library's file
+There is one zip per platform and version, built from the same commit:
+
+| Zip | For |
+|---|---|
+| `arcade_sdk-windows-<version>.zip` | 64-bit Windows games (x64) |
+| `arcade_sdk-windows-x86-<version>.zip` | 32-bit Windows games (x86) |
+| `arcade_sdk-linux-<version>.zip` | Linux games (x86-64) |
+
+The API, protos and `arcade-sdk` are identical; only the library's file
 name and how you load it differ. Below, "the DLL" means whichever you are
 shipping.
+
+**A 32-bit game takes the x86 zip**: a process can only load a DLL of its own
+bitness. That zip's `arcade_sdk.dll`, `arcade_sdk.lib` and `arcade_sdk.pdb` are
+32-bit; its `arcade-sdk.exe` is the same 64-bit program as in the x64 zip — it
+runs as its own process, so it does not have to match the game. The header is
+the same, and its functions use the C calling convention (`__cdecl`) on both;
+see [C#](#c) if you call them from managed code.
 
 Versions are [semantic](https://semver.org): a new major version (`2.0.0`)
 means you have to change your integration or rebuild, a minor or patch one
@@ -78,6 +91,8 @@ What we need from you, in the end:
    start with).
 6. Your action map: what each key and mouse input does in your game
    (`InitRequest.action_map`, section 5).
+7. No input from the agent takes it out of the game: no pause or main menu,
+   no settings, no quit ("Keep the agent in the game", section 5).
 
 ## 3. Design your challenges together with us
 
@@ -108,6 +123,56 @@ Declare each challenge in `InitRequest.challenges`, with its variations:
 
 `StartChallenge` always carries **every** declared variation (we fill in
 defaults for any the caller omitted), so your code never has to guess.
+
+### Rank a benchmark
+
+Variations multiply: three challenges with a few variations each is already
+hundreds of distinct runs, and we cannot play them all on every build. Tell
+us which matter with `InitRequest.benchmark`: a list of cases — a challenge
+and values for some of its variations, the rest at their defaults — ranked by
+how much each one tells about the agent playing, **the most informative
+first**.
+
+We play a prefix of it: the top 10 by default, the top 3 or 5 for a quick
+check, the top 50 or 100 when a benchmark matters enough to spend the time.
+So rank it such that **every prefix is a good benchmark by itself**:
+
+1. **Each challenge once first**, at settings that separate a capable agent
+   from a weak one — usually your defaults, or a notch harder.
+2. **Then what changes the outcome most**: each variation that makes a
+   challenge much harder or different (night, more enemies, a tighter time
+   limit, another map), at its telling extremes.
+3. **Then combinations** of those.
+4. **Last, the fine sweeps** — the steps between the extremes, more maps,
+   more colours — which add detail but rarely change the picture.
+
+```textproto
+# 1. each challenge once
+benchmark { challenge_id: "reach-the-beacon" }
+benchmark { challenge_id: "collect-coins" }
+# 2. what makes them hard
+benchmark {
+  challenge_id: "reach-the-beacon"
+  variations { name: "night" bool_value: true }
+  variations { name: "seconds" int_value: 30 }
+}
+benchmark {
+  challenge_id: "collect-coins"
+  variations { name: "count" int_value: 15 }
+}
+# 4. the sweep
+benchmark {
+  challenge_id: "reach-the-beacon"
+  variations { name: "color" enum_value: "green" }
+}
+```
+
+`arcade_init` refuses a case that names an unknown challenge or variation, a
+value out of range, or two cases that resolve to the same values (each would
+measure the same thing twice), and more than 1024 cases. `arcade-sdk
+describe` prints the ranking, and the debug app's Challenges page lists it
+with a Start per case. The benchmark is optional: without one we play each
+challenge once at its defaults, in the order you declared them.
 
 ## 4. Write `vendor.proto`
 
@@ -276,29 +341,36 @@ calling thread**, valid until that thread's next SDK call.
 
 ### C#
 
-Every parameter is blittable; x64 has one calling convention.
+Every parameter is blittable. The SDK's functions are `__cdecl`, which is the
+only calling convention on x64 but not .NET's default on 32-bit Windows
+(`StdCall`), so every `DllImport` below says `CallingConvention =
+CallingConvention.Cdecl`. Keep it when you copy them: a 32-bit game that leaves
+it out calls the SDK with the wrong convention and corrupts its stack. In a
+64-bit build it changes nothing.
 
 ```csharp
 using System.Runtime.InteropServices;
 
 static class Arcade {
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern uint arcade_abi_version();
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern IntPtr arcade_last_error();
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_init(byte[] init, nuint len);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_shutdown();
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_poll_request(byte[] buf, nuint cap, out nuint len);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_respond(ulong requestId, byte[] response, nuint len);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_fail(ulong requestId, [MarshalAs(UnmanagedType.LPUTF8Str)] string error);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern uint arcade_instance_count();
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_report(uint instance, byte[] report, nuint len);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern uint arcade_metric_handle([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_push_f32_metric(uint instance, uint handle, float value, double gameTimeS);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_submit_frame(uint instance, in ArcadeFrame frame);
-    [DllImport("arcade_sdk", ExactSpelling = true)] public static extern int arcade_poll_input(uint instance, ulong frameIndex, byte[] buf, nuint cap, out nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern uint arcade_abi_version();
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern IntPtr arcade_last_error();
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_init(byte[] init, nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_shutdown();
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_poll_request(byte[] buf, nuint cap, out nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_respond(ulong requestId, byte[] response, nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_fail(ulong requestId, [MarshalAs(UnmanagedType.LPUTF8Str)] string error);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern uint arcade_instance_count();
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_report(uint instance, byte[] report, nuint len);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern uint arcade_metric_handle([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_push_f32_metric(uint instance, uint handle, float value, double gameTimeS);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_submit_frame(uint instance, in ArcadeFrame frame);
+    [DllImport("arcade_sdk", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)] public static extern int arcade_poll_input(uint instance, ulong frameIndex, byte[] buf, nuint cap, out nuint len);
     public static string LastError() => Marshal.PtrToStringUTF8(arcade_last_error()) ?? "";
 }
 
-// 48 bytes, no padding: pin the pixel array (or use a native buffer) for the call.
+// 48 bytes (in a 32-bit build `Pixels` is 4 bytes and the last 4 are padding;
+// LayoutKind.Sequential matches the C layout either way). Pin the pixel array
+// (or use a native buffer) for the call.
 [StructLayout(LayoutKind.Sequential)]
 struct ArcadeFrame {
     public ulong FrameIndex;
@@ -326,6 +398,7 @@ Fill it once, at startup:
 | `video` | **Required.** The width and height of every frame you submit: even, 64..3840 × 64..2160. 640×360 is plenty for today's agents. |
 | `max_instances` | The most instances one process can host (0 = 1, at most 64). |
 | `action_map` | What each input does in your game: `{"KeyW": "Move forward", "Space": "Jump", "MouseLeft": "Fire", "MouseMove": "Look around"}`. See [Input](#input). |
+| `benchmark` | Optional. Runs of your challenges, the most informative first; we play the top of the list. See [Rank a benchmark](#rank-a-benchmark). |
 
 `coordinate_system` is how we read every `Vec3`, `Quat` and `Euler` you send.
 All three fields must be set; `arcade_init` refuses `UNSPECIFIED`.
@@ -412,6 +485,38 @@ out is one the agent is told does nothing, so list them all.
 and names it in the error. The debug app's Play page shows the map as your
 game's controls.
 
+#### Keep the agent in the game
+
+The agent's input is **gameplay input only**. Nothing it sends may take an
+instance out of play: no pause menu, main menu, options or key-binding
+screens, no quit or "return to title", no save/load screens, no console, no
+fullscreen or window toggles, no screenshots. Out of play the agent sees a
+menu instead of the world, the challenge stalls (or ends without reporting),
+and the attempt is lost. Leaving the game is for us to do, through
+`StopChallenge`, never for the agent.
+
+Menus that are part of play are fine: an inventory, a map, a crafting or
+dialogue screen, as long as the agent can get back into play from them with
+inputs in your action map, and closing them is listed too.
+
+This is your game's job, not the SDK's: the SDK hands you every key the
+agent presses, and only your game knows what a key does at that moment.
+Filter in your input code, for the input you take from `arcade_poll_input`:
+
+- **An input that only reaches a system screen** (`F10` opens options,
+  `Backquote` opens the console): leave it out of the action map and ignore
+  it.
+- **An input that does both** — `Escape` cancels the spell being cast, and
+  otherwise opens the pause menu: list it in the action map by what it does
+  in play (`"Escape": "Cancel spell"`), and apply only that. While a spell is
+  being cast, `Escape` cancels it; otherwise it does nothing. It must never
+  open the pause menu for an instance under the agent.
+
+The usual way is one switch at the point where your game turns a key into an
+action: for input that came from the SDK, drop the system actions, keep the
+gameplay ones. Your own keyboard (and the OS's) is not affected, so you can
+still reach your menus while you develop.
+
 ### Instances
 
 `arcade_instance_count()` (after `arcade_init`) says how many worlds to run:
@@ -445,7 +550,9 @@ per-attempt `final_metrics`.
 3. **Play**: see each instance's frames and play it with your own keyboard and
    mouse — click the picture to capture the mouse, Esc to let go. This is
    exactly what the agent sees and sends: if you can play it here, the agent
-   can too.
+   can too. Press every key, in and out of the situations where it does
+   something, and check none takes you out of the game — Esc included, with
+   the **Send Esc** button (the Esc key itself only frees the mouse).
 4. **Challenges**: start each challenge with chosen variation values and watch
    the game do it; the resolved instruction comes back on the card.
 5. **Services**: call any of your RPCs from a form generated from your `.proto`,
@@ -609,7 +716,8 @@ the registration, checks the game has started polling and submitting frames
 (writing the first one as `arcade-frame.png` beside `arcade.toml`), and
 stops both.
 `--instances N` runs it with N instances. It prints what it found — every
-challenge with its variations and defaults, every metric, your action map,
+challenge with its variations and defaults, your benchmark's ranking, every
+metric, your action map,
 your frame size and instances, your services and event kinds — and writes
 `arcade-registration.json` beside `arcade.toml`. Read the printout: it is
 exactly what we will see and play. A wrong default, a missing challenge or a

@@ -27,14 +27,14 @@ def call(method, request=None):
     return r.get('response') or {}
 
 
-def start(cid, values, run):
+def start(cid, values, run, expect_ok=True):
     r = post('start_challenge', {"instance": 0, "input": {"instance": 0, "challenge_id": cid, "values": values, "run_id": run, "seed": 7, "timeout_ms": 120000}})
     ok = bool(r.get('ok'))
     print(f"START {cid} {values}: ok={ok} err={r.get('error')!r} {r.get('elapsed_ms')}ms")
     if ok:
-        print("  task:", r['response'].get('instruction', '').split('Task: ', 1)[-1].split('\n')[0][:160])
-    else:
-        failures.append(f"start {cid}: {r.get('error')}")
+        print("  task:", r['response'].get('instruction', '').split('Task: ', 1)[-1].split('\n')[0][:200])
+    if ok != expect_ok:
+        failures.append(f"start {cid}: ok={ok}, expected {expect_ok} ({r.get('error')})")
     return ok
 
 
@@ -94,9 +94,24 @@ def main():
     if not inst.get('frames_submitted'):
         failures.append("no frames submitted")
     s = seq()
+    bench = st['init'].get('benchmark') or []
+    print("benchmark cases", len(bench), "first", [(b.get('challengeId') or b.get('challenge_id')) for b in bench[:5]])
+    if len(bench) < 30:
+        failures.append(f"benchmark has {len(bench)} cases")
+    seen = set()
+    for b in bench:
+        key = json.dumps(b, sort_keys=True)
+        if key in seen:
+            failures.append(f"duplicate benchmark case {key}")
+        seen.add(key)
 
-    # complete-mission on hard: objectives listed, then die -> FAILURE
-    if start('complete-mission', {"mission": "newjob", "difficulty": "hard", "minutes": 10}, 'e2e-cm'):
+    # invalid requests are rejected up front
+    start('stay-hidden', {"mission": "newjob", "start": "inside", "stealth": "any", "minutes": 1}, 'e2e-bad1', expect_ok=False)
+    start('newjob-reach', {"location": "inn", "start": "entrance", "minutes": 5}, 'e2e-bad2', expect_ok=False)
+    start('stlucia-item', {"item": "no-such-item", "minutes": 5}, 'e2e-bad3', expect_ok=False)
+
+    # complete-mission on hard with kills forbidden: objectives listed, then die -> FAILURE
+    if start('complete-mission', {"mission": "newjob", "difficulty": "hard", "kills": "forbidden", "stealth": "unseen", "minutes": 10}, 'e2e-cm'):
         ms = call('GetMissionState')
         print(f"  mission {ms.get('mission')} difficulty {ms.get('difficulty', 0)} loot_total {ms.get('lootTotal')} objectives {len(ms.get('objectives', []))}")
         if ms.get('difficulty', 0) != 2:
@@ -116,6 +131,40 @@ def main():
     if start('stlucia-reach', {"location": "church_lucia", "stealth": "ghost", "difficulty": "medium", "minutes": 10}, 'e2e-reach2'):
         tp(358, 612, 64)
         s, _ = wait_completed(s, 15, 'e2e-reach2', 'OUTCOME_SUCCESS')
+
+    # reach with a start tier: the player is placed at the tier's info_location, not the mission start
+    if start('newjob-reach', {"location": "kitchen", "start": "inside", "stealth": "any", "difficulty": "easy", "minutes": 10}, 'e2e-reach3'):
+        ps = call('GetPlayerState')
+        here = ps.get('location', '')
+        print(f"  start=inside: player location {here!r} at {ps.get('position')}")
+        if here != 'room_3':
+            failures.append(f"start tier placed the player in {here!r}, expected room_3")
+        tp(1160.5, -101.875, -128.25)
+        s, _ = wait_completed(s, 15, 'e2e-reach3', 'OUTCOME_SUCCESS')
+
+    # item: give the player the guard's key through the test hook
+    if start('stlucia-item', {"item": "church-entrance-key", "stealth": "any", "difficulty": "easy", "minutes": 10}, 'e2e-item'):
+        call('ExecConsoleCommand', {"command": "arcade_give Key_church_entrance"})
+        s, _ = wait_completed(s, 15, 'e2e-item', 'OUTCOME_SUCCESS')
+
+    # unlock: a door (frob mover) and the cash box (frob lock)
+    if start('stlucia-unlock', {"door": "vestibule-door", "stealth": "any", "difficulty": "easy", "minutes": 10}, 'e2e-unlock1'):
+        time.sleep(1.0)
+        call('ExecConsoleCommand', {"command": "arcade_unlock atdm_mover_door_4"})
+        s, _ = wait_completed(s, 15, 'e2e-unlock1', 'OUTCOME_SUCCESS')
+    if start('newjob-unlock', {"door": "cash-box", "stealth": "any", "difficulty": "easy", "minutes": 10}, 'e2e-unlock2'):
+        time.sleep(1.0)
+        call('ExecConsoleCommand', {"command": "arcade_unlock JewelleryBoxBody_1"})
+        s, _ = wait_completed(s, 15, 'e2e-unlock2', 'OUTCOME_SUCCESS')
+
+    # pickpocket: start and stop (needs a live guard to lift from)
+    if start('pickpocket', {"mission": "stlucia", "count": 2, "stealth": "unseen", "difficulty": "easy", "minutes": 10}, 'e2e-pp'):
+        stop()
+        s, _ = wait_completed(s, 10, 'e2e-pp', 'OUTCOME_ABORTED')
+
+    # stay-hidden for one minute at the tavern entrance -> SUCCESS at the time limit
+    if start('stay-hidden', {"mission": "newjob", "start": "entrance", "stealth": "unseen", "difficulty": "easy", "minutes": 1}, 'e2e-hide'):
+        s, _ = wait_completed(s, 80, 'e2e-hide', 'OUTCOME_SUCCESS')
 
     # steal-loot: totals then stop -> ABORTED
     if start('steal-loot', {"mission": "stlucia", "percent": 10, "stealth": "any", "difficulty": "easy", "minutes": 10}, 'e2e-loot'):
@@ -157,6 +206,16 @@ def main():
             failures.append(f"injected W did not move the player ({moved:.1f} units)")
         if turned < 5:
             failures.append(f"injected mouse motion did not turn the view ({turned:.1f} deg)")
+        # non-gameplay keys are dropped: Escape must not open the menu (the attempt keeps running)
+        play([{"type": "Key", "code": "Escape", "down": True}]); hold(0.3); play([{"type": "Key", "code": "Escape", "down": False}]); hold(1.0)
+        play([{"type": "Move", "dx": 600, "dy": 0}]); hold(0.3)   # turn around: the first walk may have ended at a wall
+        st1 = call('GetPlayerState')
+        play([{"type": "Key", "code": "KeyW", "down": True}]); hold(1.0); play([{"type": "Key", "code": "KeyW", "down": False}])
+        st2 = call('GetPlayerState')
+        moved2 = ((st2['position']['x'] - st1['position']['x']) ** 2 + (st2['position']['y'] - st1['position']['y']) ** 2) ** 0.5
+        print(f"  after Escape: W moved {moved2:.1f} units (game still in play)")
+        if moved2 < 10:
+            failures.append(f"after an injected Escape the player no longer moves ({moved2:.1f} units): menu opened?")
         post('play/release', {"instance": 0})
         stop()
         s, _ = wait_completed(s, 10, 'e2e-input', 'OUTCOME_ABORTED')

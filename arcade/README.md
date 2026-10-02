@@ -15,7 +15,7 @@ machines (`arcade-windows.toml`).
 | `LAUNCH-linux.txt` / `LAUNCH-windows.txt` | Human-readable notes shipped with the build as `LAUNCH.txt`. |
 | `stage_build.sh [linux\|windows]` | Assembles `out/client/` (Linux) or `out/windows/` (Windows, plus `vcruntime140.dll` for the SDK DLL) from the built engine, the SDK library, game data and the two missions (as the combined `fms/arcade` folder). |
 | `fm_overrides/` | Loose files for `fms/arcade` that resolve collisions between the two mission pk4s: the merged `tdm_custom_scripts.script` include list, merged sound shaders and subtitles, `darkmod.txt`. Loose files override pk4 contents. |
-| `fetch_sdk.sh [linux] [windows]` | Downloads the pinned SDK release (GitHub release `arcade-sdk-v<version>` of get-wrecked/ai-research, via `gh`): the libraries into `ThirdParty/arcade_sdk/{linux_64,windows_64}/` and the `arcade-sdk` CLI (submit, describe, debug app) into `tools/`. |
+| `fetch_sdk.sh [linux] [windows]` | Downloads the pinned SDK build (a per-commit zip from the SDK bucket via `gsutil` when `SDK_SHA` is set, which is the default right now; otherwise GitHub release `arcade-sdk-v<version>` of get-wrecked/ai-research, via `gh`): the libraries into `ThirdParty/arcade_sdk/{linux_64,windows_64}/` and the `arcade-sdk` CLI (submit, describe, debug app) into `tools/`. |
 
 `out/`, `tools/`, `arcade-registration*.json` and the SDK libraries are not committed.
 

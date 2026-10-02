@@ -28,6 +28,43 @@ one zip, and use the `arcade-sdk` from that zip too.
 
 ## Unreleased
 
+- **Rank a benchmark for your build.** A new optional field,
+  `InitRequest.benchmark`, lists runs of your challenges — a challenge and
+  values for some of its variations — ranked by how much each tells about the
+  agent, the most informative first. We play the top of that list: the first
+  10 cases by default, a handful for a quick check, 50 or 100 when a
+  benchmark matters. So order it such that every prefix is a good benchmark on its
+  own; "Rank a benchmark" in the guide shows how. `arcade_init` checks every
+  case (a declared challenge, declared variations, values in range, no two
+  cases alike); `arcade-sdk describe` prints the ranking and the debug app
+  lists it with a Start per case. Without it nothing changes: a run plays
+  each challenge once at its defaults.
+
+- **32-bit Windows games are supported.** A new zip,
+  `arcade_sdk-windows-x86-<version>.zip`, carries a 32-bit `arcade_sdk.dll`,
+  `arcade_sdk.lib` and `arcade_sdk.pdb`; use it for an x86 build of your game.
+  The header, protos and `arcade-sdk.exe` (still 64-bit) are the same as in the
+  x64 zip. Calling from C# in a 32-bit build, add `CallingConvention =
+  CallingConvention.Cdecl` to every `DllImport`; the guide's C# example now
+  declares it on each one.
+
+## 2.2.1 — 2026-10-01 (ABI 2)
+
+- **Keep the agent in the game.** The guide now spells out that the agent's
+  input is gameplay input only: nothing it sends may open the pause or main
+  menu, settings or the console, or quit. Ignore inputs that only do that,
+  and for one that does both — `Escape` cancels a spell, and otherwise
+  pauses — map it by its gameplay meaning and apply only that. See "Keep the
+  agent in the game" in the guide. Nothing changes in the library; check
+  your build against it.
+
+- **Windows builds run under Proton.** Under Wine, `arcade_init` failed with
+  `bind the SDK's QUIC endpoint on 127.0.0.1:6006: OS Error 10045`, so a
+  Windows build submitted with `proton = true` never became ready on arcade.
+  The library now falls back to a plain UDP socket when the network stack
+  refuses the socket options it normally sets. Nothing changes natively.
+  Rebuild with this library and resubmit your build.
+
 ## 2.2.0 — 2026-09-30 (ABI 2)
 
 - **Build verification.** Every build you submit is now run once on arcade to

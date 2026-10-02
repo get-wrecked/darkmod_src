@@ -83,6 +83,25 @@ public:
 		const char *entity;		// info_location entity name
 		const char *display;	// "the church kitchen"
 	};
+	struct ItemSpec {
+		const char *mission;
+		const char *slug;		// variation value, e.g. "church-entrance-key"
+		const char *invName;	// the item's inv_name (what CInventory::GetItem matches)
+		const char *display;	// "the church entrance key"
+		const char *hint;		// where it is / who carries it
+	};
+	struct DoorSpec {
+		const char *mission;
+		const char *slug;		// variation value, e.g. "vestibule-door"
+		const char *entity;		// CBinaryFrobMover or CFrobLock entity name
+		const char *display;	// "the vestibule door inside the church"
+		const char *hint;		// which key opens it / where it is
+	};
+	struct StartSpec {
+		const char *mission;
+		const char *tier;		// shared across missions: "outside", "entrance", "inside", "deep"
+		const char *entity;		// info_location whose origin the player is placed at
+	};
 
 private:
 	enum State {
@@ -125,6 +144,8 @@ private:
 		int difficulty;				// 0..2
 		int limitSeconds;
 		StealthRule stealth;
+		bool killsForbidden;		// "kills" variation: any kill fails the attempt
+		std::string startTier;		// "mission-start" or a StartSpec tier
 		uint64_t pendingRequestId;	// StartChallenge request awaiting the map load
 		int mapGenerationAtRequest;
 		int loadIssuedMs;			// Sys_Milliseconds when the map command was queued
@@ -133,7 +154,7 @@ private:
 		float distanceUnits;
 		int maxAlertSeen;
 		std::set<std::string> visited;	// explore: distinct info_location names entered
-		Attempt() : seed( 0 ), mission( -1 ), difficulty( 0 ), limitSeconds( 0 ), stealth( STEALTH_ANY ),
+		Attempt() : seed( 0 ), mission( -1 ), difficulty( 0 ), limitSeconds( 0 ), stealth( STEALTH_ANY ), killsForbidden( false ),
 			pendingRequestId( 0 ), mapGenerationAtRequest( 0 ), loadIssuedMs( 0 ), startGameTime( 0 ),
 			lastOrigin( vec3_origin ), distanceUnits( 0.0f ), maxAlertSeen( 0 ) {}
 	};
@@ -182,6 +203,14 @@ private:
 	int MissionIndexForChallenge( const std::string &id ) const;	// for per-mission ids, else -1
 	const ObjectiveSpec *FindObjectiveSpec( int mission, const std::string &slug ) const;
 	const LocationSpec *FindLocationSpec( int mission, const std::string &entity ) const;
+	const ItemSpec *FindItemSpec( int mission, const std::string &slug ) const;
+	const DoorSpec *FindDoorSpec( int mission, const std::string &slug ) const;
+	const StartSpec *FindStartSpec( int mission, const std::string &tier ) const;
+	bool ChallengeHasSuffix( const std::string &id, const char *suffix ) const;
+	void ApplyStartPosition();
+	bool DoorUnlocked( const DoorSpec &door, bool &exists ) const;
+	void BuildBenchmark( ArcadeProto::Writer &init ) const;
+	static bool IsGameplayKey( int tdmKey );
 	const char *LocationDisplayName( int mission, const char *entity ) const;
 	bool ObjectiveSpecComplete( const ObjectiveSpec &spec, bool &failed, std::string &text ) const;
 	float StealthFactor( const MissionSnapshot &s ) const;
